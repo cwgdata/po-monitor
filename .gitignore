@@ -24,5 +24,8 @@ npm-debug.log*
 *.tfstate
 *.tfstate.*
 
+# Local-only deploy config — workspace host + warehouse id, kept out of git
+scripts/.deploy.env
+
 # OS
 .DS_Store

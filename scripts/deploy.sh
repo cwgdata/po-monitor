@@ -6,6 +6,12 @@
 # Example:
 #   ./scripts/deploy.sh https://my-ws.cloud.databricks.com <warehouse-id> dev
 #
+# Or, for repeated deploys to the same workspace, drop the args and put values
+# in scripts/.deploy.env (gitignored — see scripts/deploy.env.example):
+#   WORKSPACE_HOST=https://my-ws.cloud.databricks.com
+#   WAREHOUSE_ID=abcd1234ef
+#   TARGET=dev   # optional
+#
 # Prereqs:
 #   - databricks CLI v0.260+ (bundle support)
 #   - node 18+, npm
@@ -14,13 +20,25 @@
 
 set -euo pipefail
 
-WORKSPACE_HOST="${1:-}"
-WAREHOUSE_ID="${2:-}"
-TARGET="${3:-dev}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEPLOY_ENV="$REPO_ROOT/scripts/.deploy.env"
+
+# If positional args are missing, try sourcing the gitignored local config.
+if [[ -z "${1:-}" || -z "${2:-}" ]]; then
+  if [[ -f "$DEPLOY_ENV" ]]; then
+    # shellcheck disable=SC1090
+    set -a; . "$DEPLOY_ENV"; set +a
+  fi
+fi
+
+WORKSPACE_HOST="${1:-${WORKSPACE_HOST:-}}"
+WAREHOUSE_ID="${2:-${WAREHOUSE_ID:-}}"
+TARGET="${3:-${TARGET:-dev}}"
 
 if [[ -z "$WORKSPACE_HOST" || -z "$WAREHOUSE_ID" ]]; then
   echo "Usage: $0 <workspace_host> <warehouse_id> [target]" >&2
   echo "Example: $0 https://my-ws.cloud.databricks.com <warehouse-id> dev" >&2
+  echo "Or set WORKSPACE_HOST + WAREHOUSE_ID in scripts/.deploy.env (gitignored)" >&2
   exit 1
 fi
 
