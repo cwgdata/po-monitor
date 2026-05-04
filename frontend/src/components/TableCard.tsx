@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, getActiveWarehouseId, type HealthResponse, type PoRun, type TableRef } from '../lib/api';
 import { Toggle } from './Toggle';
@@ -143,13 +143,27 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
   const [hasSeenRunning, setHasSeenRunning] = useState<Record<string, boolean>>({});
   const [opSubmittedAt, setOpSubmittedAt] = useState<Record<string, string>>({});
 
+  // fetchGen + mounted guard against stale resolves: the user removes the
+  // card mid-fetch, the parent swaps tableRef, or auto-refresh races a
+  // manual refresh. Each refresh bumps the gen; only the latest commits.
+  const fetchGen = useRef(0);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
   const refresh = async () => {
+    const gen = ++fetchGen.current;
+    const isStale = () => !mounted.current || gen !== fetchGen.current;
+
     // Guard: don't auto-start a stopped warehouse. Check state via the
     // management API (no-start) before firing queries.
     const whId = getActiveWarehouseId();
     if (whId) {
       try {
         const { warehouses } = await api.listWarehouses();
+        if (isStale()) return;
         const wh = warehouses.find((w) => w.id === whId);
         const state = (wh?.state || '').toUpperCase();
         if (wh && state !== 'RUNNING' && state !== 'STARTING') {
@@ -160,14 +174,19 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
         // If the status check itself fails, fall through and let queries error naturally.
       }
     }
+    if (isStale()) return;
     setWarehouseBlocked(null);
     setRefreshing(true);
     Promise.all([
-      api.getHealth(tableRef.catalog, tableRef.schema, tableRef.table).catch((e) => { setErr(e.message); return null; }),
+      api.getHealth(tableRef.catalog, tableRef.schema, tableRef.table).catch((e) => {
+        if (!isStale()) setErr(e.message);
+        return null;
+      }),
       api.getPoRuns(tableRef.catalog, tableRef.schema, tableRef.table, 30).catch(() => ({ runs: [] })),
       api.getTrends(tableRef.catalog, tableRef.schema, tableRef.table, 30).catch(() => null),
       api.getMerges(tableRef.catalog, tableRef.schema, tableRef.table, 24).catch(() => null),
     ]).then(([h, r, t, m]) => {
+      if (isStale()) return;
       const newRuns = r?.runs || [];
       const newTrends = t || null;
       const newMerges = m || null;
@@ -185,7 +204,9 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
         api.saveCardCache({ catalog: tableRef.catalog, schema: tableRef.schema, table: tableRef.table, payload })
           .catch(() => { /* non-fatal */ });
       }
-    }).finally(() => setRefreshing(false));
+    }).finally(() => {
+      if (!isStale()) setRefreshing(false);
+    });
   };
 
   useEffect(() => { refresh(); }, [tableRef.catalog, tableRef.schema, tableRef.table]);
@@ -621,7 +642,7 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
             setTimeout(() => setOpStatus((s) => { const n = { ...s }; delete n['FORCE_PO']; return n; }), 1500);
             return r;
           },
-          { details: 'Stub — currently returns 501.' })}>
+          { details: 'Submits OPTIMIZE + VACUUM LITE as a stand-in for the PO scheduler.' })}>
         {statusLabel('FORCE_PO', 'Force PO')}
       </button>
       <button

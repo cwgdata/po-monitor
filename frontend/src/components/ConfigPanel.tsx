@@ -147,9 +147,10 @@ export function ConfigPanel() {
           placeholder="team@example.com"
         />
 
-        <div className="stub">
-          Email delivery STUBBED. Options: SMTP via env vars, or a Databricks Job
-          with notification_settings that fires on eval failure.
+        <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+          Alerts to this address are delivered via a Databricks notification
+          destination. The destination is auto-created on first send if one
+          doesn't already point at this address.
         </div>
 
         <h3 style={{ marginTop: 24 }}>Thresholds</h3>

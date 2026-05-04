@@ -4,6 +4,7 @@ Uses the Databricks SDK's statement_execution surface. Honors user OBO
 (pass a user-scoped WorkspaceClient) so all data reads happen as the
 logged-in user — no service principal bypasses UC ACLs.
 """
+import re
 from typing import Any, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import (
@@ -12,6 +13,46 @@ from databricks.sdk.service.sql import (
     ExecuteStatementRequestOnWaitTimeout,
 )
 from .config import get_warehouse_id
+
+
+# UC-safe identifier pattern. Reject anything that could break out of a
+# backtick-quoted identifier — most importantly the backtick itself, plus
+# control characters and SQL metacharacters. UC permits a wide character
+# set in identifiers, but we choose to be conservative since every legitimate
+# Databricks deployment we've seen uses [A-Za-z0-9_-] names.
+_IDENT_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]{0,254}$")
+
+
+class InvalidIdentifier(ValueError):
+    """Raised when a catalog/schema/table identifier fails validation."""
+
+
+def validate_ident(name: str, kind: str = "identifier") -> str:
+    """Validate a catalog/schema/table identifier; raise on hostile input.
+
+    Use at every route boundary BEFORE the name is interpolated into SQL.
+    Names returned from `SHOW TABLES` / `SHOW SCHEMAS` should also pass
+    through `escape_ident` rather than this — those are trusted to exist
+    but may contain odd characters that we still need to safely quote.
+    """
+    if not isinstance(name, str) or not _IDENT_RE.match(name):
+        raise InvalidIdentifier(f"invalid {kind}: {name!r}")
+    return name
+
+
+def escape_ident(name: str) -> str:
+    """Defensively escape an identifier for backtick-quoted interpolation.
+
+    Used for names that come from SHOW TABLES / SHOW SCHEMAS where we trust
+    they exist (UC returned them) but cannot trust their content. Doubles
+    any embedded backtick, the canonical SQL escape for backtick quoting.
+    Caller must still wrap the return value in backticks.
+    """
+    if not isinstance(name, str):
+        raise InvalidIdentifier(f"non-string identifier: {name!r}")
+    if "\x00" in name or "\n" in name or "\r" in name:
+        raise InvalidIdentifier(f"control chars in identifier: {name!r}")
+    return name.replace("`", "``")
 
 
 def _coerce_params(parameters):

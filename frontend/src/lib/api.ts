@@ -92,6 +92,11 @@ export const api = {
     request<HealthResponse>(
       `/api/po/health?catalog=${c(catalog)}&schema=${c(schema)}&table=${c(table)}`,
     ),
+  getGroupHealth: (catalog: string, schema?: string | null, max_tables = 50) => {
+    const q = new URLSearchParams({ catalog, max_tables: String(max_tables) });
+    if (schema) q.set('schema', schema);
+    return request<GroupHealthResponse>(`/api/po/group_health?${q.toString()}`);
+  },
   getTrends: (catalog: string, schema: string, table: string, days = 30) =>
     request<{
       files_bytes: Array<{ date: string; files: number; bytes: number }>;
@@ -309,6 +314,8 @@ export type HealthResponse = {
   reasons: string[];
   last_optimize?: PoRun;
   last_vacuum?: PoRun;
+  vacuum_age_days?: number | null;
+  failure_rate?: number;
   detail?: {
     num_files: number;
     size_bytes: number;
@@ -324,13 +331,52 @@ export type HealthResponse = {
   unclustered_proxy?: {
     files_since_last_optimize: number | null;
     bytes_since_last_optimize: number | null;
+    ratio?: number | null;
   };
+  merges?: {
+    window_hours?: number;
+    total?: number;
+    successful?: number;
+    failed?: number;
+    conflicts?: number;
+    conflict_rate?: number;
+    error?: string;
+  } | null;
   po_state?: {
     enabled: boolean | null;
     raw: string | null;
     inherited: boolean;
   };
   spike?: string;
+};
+
+export type GroupRef = {
+  kind: 'schema' | 'catalog';
+  catalog: string;
+  schema?: string | null;
+};
+
+export type GroupHealthResponse = {
+  group: GroupRef;
+  badge: 'green' | 'amber' | 'red' | 'unknown';
+  total_tables: number;
+  evaluated_tables: number;
+  truncated: boolean;
+  max_tables: number;
+  counts: { red: number; amber: number; green: number; unknown: number; error: number };
+  totals: { size_bytes: number; num_files: number; avg_file_size_bytes: number };
+  avg_failure_rate: number;
+  last_optimize_max: string | null;
+  last_vacuum_max: string | null;
+  offenders: Array<{
+    catalog: string;
+    schema: string;
+    table: string;
+    badge: string;
+    reasons: string[];
+    vacuum_age_days?: number | null;
+    failure_rate?: number;
+  }>;
 };
 
 export type AuditEntry = {

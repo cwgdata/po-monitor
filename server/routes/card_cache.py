@@ -7,9 +7,10 @@ on a new device shows last-known data instantly.
 from typing import Any, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .. import db
+from ..sql_client import InvalidIdentifier, validate_ident
 
 router = APIRouter(prefix="/api/card-cache", tags=["card-cache"])
 
@@ -20,6 +21,14 @@ class CachePayload(BaseModel):
     table: str
     payload: dict[str, Any]
 
+    @field_validator("catalog", "schema", "table")
+    @classmethod
+    def _check_ident(cls, v: str, info) -> str:
+        try:
+            return validate_ident(v, info.field_name)
+        except InvalidIdentifier as e:
+            raise ValueError(str(e)) from e
+
 
 @router.get("")
 def get_cache(
@@ -28,6 +37,12 @@ def get_cache(
     table: str,
     x_forwarded_email: Optional[str] = Header(default=None),
 ):
+    try:
+        validate_ident(catalog, "catalog")
+        validate_ident(schema, "schema")
+        validate_ident(table, "table")
+    except InvalidIdentifier as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not x_forwarded_email:
         return {"payload": None, "updated_at": None}
     try:

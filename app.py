@@ -4,6 +4,7 @@ Serves React frontend + JSON API. Honors OBO user auth via
 X-Forwarded-Access-Token header on every data-touching route.
 """
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -75,16 +76,25 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PO Monitor", version="0.2.0", lifespan=lifespan)
 
 
+_APP_DEBUG = os.environ.get("PO_MONITOR_DEBUG", "").lower() in ("1", "true", "yes")
+
+
 @app.exception_handler(Exception)
 async def _debug_exception_handler(request: Request, exc: Exception):
-    """Surface the full traceback for 500s so we can see what's failing."""
+    """Always log the traceback server-side; only echo it to clients in debug mode.
+
+    Set PO_MONITOR_DEBUG=1 to surface tracebacks in JSON responses for local
+    troubleshooting. In prod, clients get a generic error and the operator
+    reads the server log for the full trace.
+    """
     import traceback as _tb
     tb = _tb.format_exc()
     print(f"[unhandled] {request.url.path}: {tb}")
-    return JSONResponse(
-        {"error": type(exc).__name__, "detail": str(exc), "traceback": tb.splitlines()[-12:]},
-        status_code=500,
-    )
+    body: dict = {"error": type(exc).__name__, "detail": "internal error"}
+    if _APP_DEBUG:
+        body["detail"] = str(exc)
+        body["traceback"] = tb.splitlines()[-12:]
+    return JSONResponse(body, status_code=500)
 
 
 @app.middleware("http")

@@ -109,7 +109,7 @@ def get_user_client(user_token: Optional[str]) -> WorkspaceClient:
     return get_app_client()
 
 
-# Alert / threshold defaults — override via Config page (persisted in-memory for v1)
+# Alert / threshold defaults — override via Config page (persisted in UC).
 DEFAULT_THRESHOLDS = {
     "optimize_amber_days": 7,
     "optimize_red_days": 14,
@@ -119,5 +119,8 @@ DEFAULT_THRESHOLDS = {
     "file_size_drop_amber_pct": 0.15,
     "optimize_failure_rate_amber": 0.10,
     "optimize_failure_rate_red": 0.30,
+    "merge_conflict_rate_amber": 0.10,
+    "merge_conflict_rate_red": 0.30,
+    "merge_window_hours": 24,
     "auto_refresh_seconds": 300,
 }

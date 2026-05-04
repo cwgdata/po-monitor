@@ -7,11 +7,11 @@ Jobs API for PB-scale tables.
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .. import db
 from ..config import get_user_client
-from ..sql_client import execute_sql
+from ..sql_client import InvalidIdentifier, execute_sql, validate_ident
 
 router = APIRouter(prefix="/api/actions", tags=["actions"])
 
@@ -28,6 +28,14 @@ class TableRef(BaseModel):
     catalog: str
     schema: str
     table: str
+
+    @field_validator("catalog", "schema", "table")
+    @classmethod
+    def _check_ident(cls, v: str, info) -> str:
+        try:
+            return validate_ident(v, info.field_name)
+        except InvalidIdentifier as e:
+            raise ValueError(str(e)) from e
 
 
 class VacuumRequest(TableRef):
@@ -180,18 +188,77 @@ def force_trigger(
 ):
     """Force PO to run outside its normal cadence.
 
-    TODO: No public SQL command for forcing PO yet. Options:
-      1. Call the PO REST API if/when exposed
-      2. Kick off a manual OPTIMIZE + VACUUM bundle as a stand-in
-      3. File an internal ask
-    For v1: stub returns 501 so frontend can show "coming soon".
+    There is no public SQL command for forcing the PO scheduler itself.
+    Stand-in: submit OPTIMIZE + VACUUM LITE as the OBO user — these are the
+    same operations PO would run. Both submitted in parallel via threads
+    so the HTTP request returns in ~5s rather than ~10s sequential.
     """
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    full = f"`{req.catalog}`.`{req.schema}`.`{req.table}`"
     user = x_forwarded_email or "unknown"
-    _audit(user, "FORCE_PO", f"{req.catalog}.{req.schema}.{req.table}", "not_implemented")
-    raise HTTPException(
-        status_code=501,
-        detail="Force PO trigger not wired yet. See server/routes/actions.py TODO.",
+    from ..config import get_warehouse_id as _gwh
+    try:
+        wh_used = _gwh()
+    except Exception as e:
+        _audit(user, "FORCE_PO", full, "error",
+               {"error": f"warehouse lookup: {e}",
+                "client_kind": "user" if x_forwarded_email else "sp"})
+        raise HTTPException(status_code=500, detail=f"warehouse lookup failed: {e}")
+    client_kind = "user" if x_forwarded_email else "sp"
+
+    submitted: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+
+    statements = (
+        ("OPTIMIZE", f"OPTIMIZE {full}"),
+        ("VACUUM_LITE", f"VACUUM {full} LITE"),
     )
+
+    # Capture contextvars so the WAREHOUSE_OVERRIDE set by middleware
+    # follows the worker threads (same fix as group_health).
+    ctx = contextvars.copy_context()
+
+    def _submit(label_sql):
+        label, sql = label_sql
+        try:
+            res = execute_sql(client, sql, wait_timeout="5s", fire_and_forget=True)
+            return label, {
+                "statement_id": res.get("statement_id"),
+                "state": res.get("state"),
+                "done": res.get("done", False),
+            }, None
+        except Exception as e:
+            return label, None, str(e)
+
+    with ThreadPoolExecutor(max_workers=len(statements)) as ex:
+        for label, ok, err in ex.map(lambda s: ctx.run(_submit, s), statements):
+            if ok is not None:
+                submitted[label] = ok
+            if err is not None:
+                errors[label] = err
+
+    audit_meta = {
+        "submitted": submitted,
+        "errors": errors or None,
+        "warehouse_id": wh_used,
+        "client_kind": client_kind,
+    }
+    if errors and not submitted:
+        _audit(user, "FORCE_PO", full, "error", audit_meta)
+        raise HTTPException(status_code=500, detail=f"All sub-statements failed: {errors}")
+
+    _audit(user, "FORCE_PO", full,
+           "submitted" if not errors else "partial",
+           audit_meta)
+    return {
+        "status": "submitted" if not errors else "partial",
+        "target": full,
+        "note": "PO scheduler has no public force endpoint; submitted equivalent OPTIMIZE + VACUUM LITE as a stand-in.",
+        "submitted": submitted,
+        "errors": errors or None,
+    }
 
 
 @router.post("/schedule")

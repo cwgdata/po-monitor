@@ -32,26 +32,36 @@ po-monitor/
     config.py                # Dual-mode auth helpers, thresholds
     sql_client.py            # Statement Execution wrapper
     routes/
-      catalog.py             # /api/catalog/* — catalogs/schemas/tables (REAL)
-      po.py                  # /api/po/* — PO runs, desc detail, health (REAL)
-      actions.py             # /api/actions/* — OPTIMIZE/VACUUM/toggle/schedule (mixed)
-      alerts.py              # /api/alerts/* — rule CRUD, Slack test (rules real, eval stubbed)
+      catalog.py             # /api/catalog/* — catalogs/schemas/tables
+      po.py                  # /api/po/* — PO runs, desc detail, health, group rollups, merges
+      actions.py             # /api/actions/* — OPTIMIZE/VACUUM/toggle/force-trigger/audit
+      alerts.py              # /api/alerts/* — rule CRUD + on-demand /test
+      schedules.py           # /api/schedules/* — cron + trigger schedules
+      dashboards.py          # /api/dashboards/* — saved dashboard configs (per-user)
+      feedback.py            # /api/feedback — submission → notification destinations
+      card_cache.py          # /api/card-cache — last-known card payload, per user
       config.py              # /api/config — runtime config
+    db.py                    # UC bootstrap + persistence helpers (config, audit, alerts, schedules…)
+    alerts_engine.py         # Alert evaluation tick loop (asyncio task)
+    alerts_dispatch.py       # Slack webhook + Databricks email destination delivery
+    scheduler.py             # Schedule firing tick loop (asyncio task)
+    sql_client.py            # Statement Execution wrapper
   sql/
-    po_runs.sql              # PO system-table query (SPIKE)
-    desc_detail.sql          # DESC DETAIL stub
+    po_runs.sql              # PO system-table query
+    desc_detail.sql          # DESC DETAIL extract
     list_managed_iceberg.sql # UC info_schema query
   frontend/
     package.json  vite.config.ts  tsconfig.json  index.html
     src/
       App.tsx  main.tsx  styles.css
-      hooks/useSelection.ts
+      hooks/useSelection.ts  # tables[] + groups[] + persistence
       lib/api.ts
       components/
-        Selector.tsx         # Catalog → Schema → Table cascade
+        Selector.tsx         # Catalog → Schema → Table cascade + rollup buttons
         TableCard.tsx        # Per-table dashboard tile
-        AlertsPanel.tsx
-        ConfigPanel.tsx
+        GroupCard.tsx        # Schema/catalog rollup tile
+        AlertsPanel.tsx  ConfigPanel.tsx  SchedulesPanel.tsx
+        FeedbackModal.tsx  Toggle.tsx
 ```
 
 ## Run locally
@@ -150,27 +160,28 @@ Every data read is authorized as the logged-in user.
 |---|---|---|
 | Catalog/schema/table cascade | REAL | `/api/catalog/*`, filters to managed Iceberg via `information_schema.tables` |
 | Multi-select, 20-table cap | REAL | `useSelection` hook, URL + localStorage persistence |
+| Schema / catalog rollup cards | REAL | `/api/po/group_health` aggregates badge counts + totals + top offenders across every managed Iceberg/Delta table in the grouping. Add via "+ rollup" buttons in the sidebar |
 | `DESC DETAIL` KPIs (num files, size, avg size) | REAL | `/api/po/detail` |
 | PO run history + status table | REAL (SPIKE) | Queries `system.storage.predictive_optimization_operations_history`; graceful empty + spike note if system table name differs |
-| Health badge | PARTIAL | Only OPTIMIZE-failure-rate rule wired. TODO: VACUUM age, unclustered %, 3d avg-size-drop |
+| Health badge | REAL | Full ruleset: OPTIMIZE failure rate, VACUUM age, unclustered ratio, 7d avg-size drop. Thresholds editable on Config page |
 | File-count trend sparkline | REAL | Derived from `files_compacted` across OPTIMIZE runs |
-| Avg file size trend over time | STUB | Need a daily snapshot table — `DESC DETAIL` is point-in-time only |
-| DV count trend | STUB | Column `num_deletion_vectors_removed` in PO metrics is per-run, not absolute — need source |
-| Unclustered bytes | STUB | `DESC DETAIL` may expose in newer DBR; else probe liquid-clustering metrics |
-| Time since OPTIMIZE / VACUUM | REAL | Computed client-side from run history |
-| MERGE conflict rate | STUB | TODO: query `system.access.audit` for `DELTA_CONCURRENT_DELETE_DELETE` / `DELTA_DUPLICATE_ACTIONS_FOUND` errors in last 24h |
-| OPTIMIZE button | REAL | Statement Execution synchronous. TODO: switch to Jobs API for long-running compactions |
-| VACUUM LITE / FULL buttons | REAL (SQL) | Fires `VACUUM … LITE/FULL`; FULL confirm modal wired. TODO: Jobs API |
-| Enable / Disable PO toggle | REAL | `ALTER TABLE … SET TBLPROPERTIES` |
-| Force PO trigger | STUB (501) | No public SQL to force PO; comment-tracked |
-| Schedule OPTIMIZE / VACUUM | STUB (501) | TODO: Jobs API `jobs.create` with SqlTask + quartz_cron_expression |
-| Audit log | PARTIAL | In-memory list exposed at `/api/actions/audit`. TODO: persist to UC table `po_monitor_audit` |
-| Alerts: rule CRUD | REAL | In-memory; `/api/alerts` |
-| Alerts: Slack webhook delivery | REAL (manual) | `POST /api/alerts/test` fires a test payload |
-| Alerts: evaluation loop | STUB | Need APScheduler or a separate Databricks Job to poll rules |
-| Email delivery | STUB | Pick SMTP or Databricks Job notification_settings |
-| Config page | REAL | View + patch defaults, Slack webhook, thresholds (in-memory) |
-| Persistence of config/rules/audit | STUB | Currently in-memory. TODO: Lakebase or UC table backing |
+| Avg file size trend (7d) | REAL | Compared against `system.storage.table_metrics_history` snapshot |
+| DV count | REAL | From `DESC DETAIL` (when DBR exposes it); else null and surfaced as "n/a" |
+| Unclustered ratio (proxy) | REAL | bytes_added since last OPTIMIZE / current size_bytes — surfaced via `unclustered_proxy.ratio` |
+| Time since OPTIMIZE / VACUUM | REAL | Computed server-side from run history; `vacuum_age_days` in /api/po/health |
+| MERGE conflict rate | REAL | `/api/po/merges` queries `system.query.history` for MERGE statements; classifies failures by `DELTA_CONCURRENT_*` error pattern. Surfaced as a tile + recent-queries table on each card, factored into the health badge, and available as the `MERGE_CONFLICT_SPIKE` alert rule type |
+| OPTIMIZE button | REAL | Statement Execution, fire-and-forget. Returns statement_id so UI can poll |
+| VACUUM LITE / FULL buttons | REAL | Same pattern; FULL confirm modal wired |
+| Enable / Disable PO toggle | REAL | `ALTER TABLE … {ENABLE\|DISABLE} PREDICTIVE OPTIMIZATION` |
+| Force PO trigger | REAL | Stand-in: submits OPTIMIZE + VACUUM LITE as the OBO user (PO scheduler has no public force endpoint) |
+| Schedule OPTIMIZE / VACUUM | REAL | Cron + trigger schedules persisted in UC; background tick loop in `server/scheduler.py` |
+| Audit log | REAL | Persisted to `${PO_MONITOR_CATALOG}.po_monitor.audit`, 100-row default page |
+| Alerts: rule CRUD | REAL | Persisted to `${PO_MONITOR_CATALOG}.po_monitor.alert_rules` |
+| Alerts: Slack webhook delivery | REAL | `server/alerts_dispatch.py` — webhook resolved per-rule → user → global |
+| Alerts: evaluation loop | REAL | `server/alerts_engine.py` runs as a background asyncio task in lifespan |
+| Email delivery | REAL | Via Databricks notification destinations, auto-created on first send |
+| Config page | REAL | View + patch global thresholds, Slack webhook, alert email — persisted in UC |
+| Persistence of config/rules/audit | REAL | All in `${PO_MONITOR_CATALOG}.po_monitor.*` (see `server/db.py`) |
 | Dark UI | REAL | Custom CSS, Databricks-ish orange accent |
 
 ## Spike notes / probe queries

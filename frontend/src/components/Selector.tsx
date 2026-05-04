@@ -1,15 +1,18 @@
 import { useEffect, useState } from 'react';
-import { api, setActiveWarehouseId, type TableRef, type SavedDashboard } from '../lib/api';
+import { api, setActiveWarehouseId, type TableRef, type GroupRef, type SavedDashboard } from '../lib/api';
 
 type Props = {
   catalog: string | null;
   schema: string | null;
   tables: TableRef[];
+  groups: GroupRef[];
   onCatalog: (c: string | null) => void;
   onSchema: (s: string | null) => void;
   onToggleTable: (t: TableRef) => void;
   onClear: () => void;
   onSetTables: (ts: TableRef[]) => void;
+  onToggleGroup: (g: GroupRef) => void;
+  isGroupSelected: (g: GroupRef) => boolean;
   autoRefreshSeconds: number;
   onAutoRefreshChange: (seconds: number) => void;
   userEmail: string | null;
@@ -24,8 +27,9 @@ const REFRESH_OPTIONS: Array<{ label: string; value: number }> = [
 ];
 
 export function Selector({
-  catalog, schema, tables,
+  catalog, schema, tables, groups,
   onCatalog, onSchema, onToggleTable, onClear, onSetTables,
+  onToggleGroup, isGroupSelected,
   autoRefreshSeconds, onAutoRefreshChange, userEmail,
 }: Props) {
   const [catalogs, setCatalogs] = useState<string[]>([]);
@@ -287,17 +291,74 @@ export function Selector({
         </div>
       )}
 
-      <div className="section-label">Catalog</div>
+      <div className="section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Catalog</span>
+        {catalog && (
+          <button
+            onClick={() => onToggleGroup({ kind: 'catalog', catalog })}
+            disabled={!catalog}
+            title={isGroupSelected({ kind: 'catalog', catalog })
+              ? 'Remove this catalog rollup card'
+              : 'Add a catalog-level rollup card to the dashboard'}
+            style={{ padding: '2px 8px', fontSize: 11 }}
+          >
+            {isGroupSelected({ kind: 'catalog', catalog }) ? '− rollup' : '+ rollup'}
+          </button>
+        )}
+      </div>
       <select value={catalog || ''} onChange={(e) => onCatalog(e.target.value || null)}>
         <option value="">Select catalog…</option>
         {catalogs.map((c) => <option key={c} value={c}>{c}</option>)}
       </select>
 
-      <div className="section-label">Schema</div>
+      <div className="section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Schema</span>
+        {catalog && schema && (
+          <button
+            onClick={() => onToggleGroup({ kind: 'schema', catalog, schema })}
+            title={isGroupSelected({ kind: 'schema', catalog, schema })
+              ? 'Remove this schema rollup card'
+              : 'Add a schema-level rollup card to the dashboard'}
+            style={{ padding: '2px 8px', fontSize: 11 }}
+          >
+            {isGroupSelected({ kind: 'schema', catalog, schema }) ? '− rollup' : '+ rollup'}
+          </button>
+        )}
+      </div>
       <select value={schema || ''} disabled={!catalog} onChange={(e) => onSchema(e.target.value || null)}>
         <option value="">Select schema…</option>
         {schemas.map((s) => <option key={s} value={s}>{s}</option>)}
       </select>
+
+      {groups.length > 0 && (
+        <>
+          <div className="section-label">Rollup cards ({groups.length})</div>
+          <ul className="table-list">
+            {groups.map((g) => {
+              const k = g.kind === 'schema' ? `${g.catalog}.${g.schema}` : g.catalog;
+              return (
+                <li
+                  key={`${g.kind}:${k}`}
+                  className="selected"
+                  onClick={() => onToggleGroup(g)}
+                  title="Remove this rollup"
+                >
+                  <span style={{
+                    fontSize: 9,
+                    padding: '1px 4px',
+                    borderRadius: 3,
+                    background: 'var(--panel-2)',
+                    color: 'var(--muted)',
+                    fontWeight: 600,
+                    letterSpacing: 0.4,
+                  }}>{g.kind === 'schema' ? 'S' : 'C'}</span>
+                  <span style={{ flex: 1, fontFamily: 'var(--mono, ui-monospace, monospace)', fontSize: 11 }}>{k}</span>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
 
       <div className="section-label" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <span>Tables ({tables.length}/20{uniquePairs.size > 1 ? ` · ${uniquePairs.size} schemas` : ''})</span>

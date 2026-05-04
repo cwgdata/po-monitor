@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Selector } from './components/Selector';
 import { TableCard } from './components/TableCard';
+import { GroupCard } from './components/GroupCard';
 import { AlertsPanel } from './components/AlertsPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { FeedbackModal } from './components/FeedbackModal';
 import { SchedulesPanel } from './components/SchedulesPanel';
-import { useSelection } from './hooks/useSelection';
+import { useSelection, groupRefKey } from './hooks/useSelection';
 import { api } from './lib/api';
 
 type Tab = 'dashboard' | 'alerts' | 'schedules' | 'config';
@@ -56,11 +57,14 @@ export default function App() {
           catalog={sel.catalog}
           schema={sel.schema}
           tables={sel.tables}
+          groups={sel.groups}
           onCatalog={sel.setCatalog}
           onSchema={sel.setSchema}
           onToggleTable={sel.toggleTable}
           onClear={sel.clearTables}
           onSetTables={sel.setTables}
+          onToggleGroup={sel.toggleGroup}
+          isGroupSelected={sel.isGroupSelected}
           autoRefreshSeconds={autoRefreshSeconds}
           onAutoRefreshChange={changeAutoRefresh}
           userEmail={user?.email || null}
@@ -97,13 +101,25 @@ export default function App() {
             running in the background — low cost, and data is already warm
             when the user comes back. */}
         <div style={{ display: tab === 'dashboard' ? 'block' : 'none' }}>
-          {sel.tables.length === 0 ? (
+          {sel.tables.length === 0 && sel.groups.length === 0 ? (
             <div className="empty-state">
               Select up to 20 managed tables (Iceberg or Delta) from the sidebar to begin monitoring.
               You can mix catalogs and schemas — switching the dropdowns won't clear your selection.
+              <br /><br />
+              Or click <strong>+ rollup</strong> next to a Catalog or Schema dropdown to add an
+              aggregate health card spanning every managed table in that grouping.
             </div>
           ) : (
             <div className="grid">
+              {sel.groups.map((g) => (
+                <GroupCard
+                  key={groupRefKey(g)}
+                  groupRef={g}
+                  onRemove={() => sel.toggleGroup(g)}
+                  onAddTable={(t) => sel.toggleTable(t)}
+                  autoRefreshSeconds={autoRefreshSeconds}
+                />
+              ))}
               {sel.tables.map((t) => (
                 <TableCard
                   key={`${t.catalog}.${t.schema}.${t.table}`}

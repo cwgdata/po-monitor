@@ -10,8 +10,61 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Header, HTTPException
 from typing import Optional
 
-from ..config import get_user_client
-from ..sql_client import execute_sql, rows_as_dicts
+from .. import db
+from ..config import DEFAULT_THRESHOLDS, get_user_client
+from ..sql_client import (
+    InvalidIdentifier,
+    escape_ident,
+    execute_sql,
+    rows_as_dicts,
+    validate_ident,
+)
+
+
+def _validate_loc(catalog: str, schema: Optional[str] = None, table: Optional[str] = None) -> None:
+    """Reject hostile identifiers before any SQL interpolation.
+
+    Raises HTTPException(400) on bad input. Use at the top of every GET route
+    that takes catalog/schema/table query params.
+    """
+    try:
+        validate_ident(catalog, "catalog")
+        if schema is not None:
+            validate_ident(schema, "schema")
+        if table is not None:
+            validate_ident(table, "table")
+    except InvalidIdentifier as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+def _load_thresholds() -> dict[str, float]:
+    """Load all thresholds in one SQL round-trip; fall back to defaults per key."""
+    cfg: dict = {}
+    try:
+        cfg = db.config_list() or {}
+    except Exception:
+        cfg = {}
+    out: dict[str, float] = {}
+    for k, default in DEFAULT_THRESHOLDS.items():
+        v = cfg.get(k, default)
+        try:
+            out[k] = float(v) if v is not None else 0.0
+        except (TypeError, ValueError):
+            out[k] = float(default) if default is not None else 0.0
+    return out
+
+
+def _parse_iso(s) -> Optional[datetime]:
+    if not s:
+        return None
+    try:
+        if isinstance(s, datetime):
+            return s if s.tzinfo else s.replace(tzinfo=timezone.utc)
+        ss = str(s).replace("Z", "+00:00")
+        dt = datetime.fromisoformat(ss)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
 
 
 def _as_int(v):
@@ -38,6 +91,7 @@ def get_po_runs(
     client=Depends(_user_client),
 ):
     """Return recent PO run history for a table."""
+    _validate_loc(catalog, schema, table)
     sql = """
         SELECT
           operation_type,
@@ -306,6 +360,7 @@ def get_running_ops(
       - Dropped the OR clause's duplicate ILIKE form — the first term covers it.
       - ORDER BY removed (we LIMIT 20, order doesn't matter for this display).
     """
+    _validate_loc(catalog, schema, table)
     from ..config import get_warehouse_id
     fq = f"{catalog}.{schema}.{table}"
     wh = get_warehouse_id()
@@ -362,6 +417,7 @@ def desc_detail(
     client=Depends(_user_client),
 ):
     """DESC DETAIL — source for num_files, size, avg file size (right now)."""
+    _validate_loc(catalog, schema, table)
     full = f"`{catalog}`.`{schema}`.`{table}`"
     try:
         result = execute_sql(client, f"DESCRIBE DETAIL {full}")
@@ -411,6 +467,7 @@ def get_trends(
     """Daily snapshots of files + bytes from system.storage.table_metrics_history,
     per-run DV-removed, and a commit-by-commit table-size series derived from
     DESCRIBE HISTORY (works even when the daily-snapshot table is empty)."""
+    _validate_loc(catalog, schema, table)
     out: dict = {"files_bytes": [], "dv_removed": [], "size_history": []}
     # 1. Daily file/byte snapshots
     sql = """
@@ -514,6 +571,7 @@ def get_merge_activity(
     Counts total MERGE statements, failed ones, and classifies failures by
     error pattern (DELTA_CONCURRENT_* = conflict, other = other).
     """
+    _validate_loc(catalog, schema, table)
     fq = f"{catalog}.{schema}.{table}"
     sql = """
       SELECT
@@ -575,16 +633,28 @@ def table_health(
     catalog: str,
     schema: str,
     table: str,
+    include_merges: bool = True,
     client=Depends(_user_client),
 ):
-    """Composite health rollup: combines DESC DETAIL + PO run history.
+    """Composite health rollup: combines DESC DETAIL + PO run history + MERGE activity.
 
-    TODO: Wire the full badge ruleset from the spec:
-      - Red: PO quarantined | VACUUM > 30d | OPTIMIZE failure rate > 30%
-      - Amber: unclustered_bytes > 20% | avg file size dropping 3d | failure 10-30%
+    Badge rules (thresholds are user-overridable via /api/config):
+      - Red: VACUUM age > vacuum_red_days
+           | OPTIMIZE failure rate > optimize_failure_rate_red
+           | MERGE conflict rate > merge_conflict_rate_red (last `merge_window_hours`)
+      - Amber: VACUUM age > vacuum_amber_days
+             | OPTIMIZE failure rate > optimize_failure_rate_amber
+             | MERGE conflict rate > merge_conflict_rate_amber
+             | unclustered ratio > unclustered_amber_pct
+             | avg file size dropping > file_size_drop_amber_pct (last 7d)
       - Green: otherwise
-    For now, returns partial signals + TODO flag.
+    Worst signal wins. `reasons` lists every triggered signal so the UI can
+    show all of them, not just the top one.
+
+    `include_merges=False` skips the extra `system.query.history` scan — used
+    by `/api/po/group_health` to keep large rollups snappy.
     """
+    _validate_loc(catalog, schema, table)
     try:
         detail = desc_detail(catalog, schema, table, client)
         runs_resp = get_po_runs(catalog, schema, table, 30, client)
@@ -612,13 +682,35 @@ def table_health(
         failed = sum(1 for r in optimize_runs if r.get("operation_status") == "FAILED")
         failure_rate = (failed / len(optimize_runs)) if optimize_runs else 0.0
 
-        # Naive badge (TODO: full rule eval)
-        badge = "green"
-        reasons = []
-        if failure_rate > 0.30:
-            badge = "red"; reasons.append(f"OPTIMIZE failure rate {failure_rate:.0%}")
-        elif failure_rate >= 0.10:
-            badge = "amber"; reasons.append(f"OPTIMIZE failure rate {failure_rate:.0%}")
+        # Days since last successful VACUUM (None if no VACUUM in lookback)
+        vacuum_age_days: Optional[float] = None
+        if last_vacuum and last_vacuum.get("start_time"):
+            ts = _parse_iso(last_vacuum["start_time"])
+            if ts:
+                vacuum_age_days = (datetime.now(timezone.utc) - ts).total_seconds() / 86400
+
+        # Full ruleset — worst signal wins, but every triggered signal is reported.
+        thr = _load_thresholds()
+        thr_fail_red = thr["optimize_failure_rate_red"]
+        thr_fail_amber = thr["optimize_failure_rate_amber"]
+        thr_vac_red_d = thr["vacuum_red_days"]
+        thr_vac_amber_d = thr["vacuum_amber_days"]
+        thr_unclust = thr["unclustered_amber_pct"]
+        thr_size_drop = thr["file_size_drop_amber_pct"]
+
+        red_reasons: list[str] = []
+        amber_reasons: list[str] = []
+
+        if optimize_runs and failure_rate > thr_fail_red:
+            red_reasons.append(f"OPTIMIZE failure rate {failure_rate:.0%}")
+        elif optimize_runs and failure_rate >= thr_fail_amber:
+            amber_reasons.append(f"OPTIMIZE failure rate {failure_rate:.0%}")
+
+        if vacuum_age_days is not None:
+            if thr_vac_red_d and vacuum_age_days > thr_vac_red_d:
+                red_reasons.append(f"VACUUM age {vacuum_age_days:.0f}d")
+            elif thr_vac_amber_d and vacuum_age_days > thr_vac_amber_d:
+                amber_reasons.append(f"VACUUM age {vacuum_age_days:.0f}d")
 
         # Trend deltas: compare current DESC DETAIL to a snapshot ~7d ago
         trend = {"files_pct": None, "bytes_pct": None, "avg_size_pct": None}
@@ -705,17 +797,82 @@ def table_health(
         except Exception:
             pass
 
+        # Unclustered ratio: bytes written since last successful OPTIMIZE
+        # divided by total table bytes. Skip if we lack either side.
+        cur_size = (detail.get("derived") or {}).get("size_bytes")
+        unclustered_ratio: Optional[float] = None
+        if (bytes_since_last_optimize is not None
+                and cur_size and cur_size > 0):
+            unclustered_ratio = bytes_since_last_optimize / cur_size
+            if thr_unclust and unclustered_ratio > thr_unclust:
+                amber_reasons.append(f"unclustered ~{unclustered_ratio:.0%}")
+
+        # Avg-size drop over last ~7d (negative trend["avg_size_pct"]).
+        avg_drop = trend.get("avg_size_pct")
+        if avg_drop is not None and thr_size_drop:
+            drop_threshold_pct = thr_size_drop * 100
+            if avg_drop < -drop_threshold_pct:
+                amber_reasons.append(f"avg file size {avg_drop:.0f}%")
+
+        # MERGE conflict signal — best-effort, skipped if include_merges=False
+        # (group_health passes False to keep large rollups fast).
+        merge_summary: Optional[dict] = None
+        if include_merges:
+            try:
+                window_h = int(thr.get("merge_window_hours") or 24)
+            except (TypeError, ValueError):
+                window_h = 24
+            try:
+                m = get_merge_activity(catalog, schema, table, hours=window_h, client=client)
+                merge_summary = {
+                    "window_hours": m.get("window_hours"),
+                    "total": m.get("total"),
+                    "successful": m.get("successful"),
+                    "failed": m.get("failed"),
+                    "conflicts": m.get("conflicts"),
+                    "conflict_rate": m.get("conflict_rate") or 0.0,
+                }
+                cr = float(merge_summary["conflict_rate"] or 0.0)
+                thr_merge_red = thr.get("merge_conflict_rate_red") or 0.0
+                thr_merge_amber = thr.get("merge_conflict_rate_amber") or 0.0
+                if (merge_summary.get("total") or 0) >= 3:
+                    if thr_merge_red and cr > thr_merge_red:
+                        red_reasons.append(
+                            f"MERGE conflict rate {cr:.0%} ({merge_summary['conflicts']}/{merge_summary['total']})"
+                        )
+                    elif thr_merge_amber and cr >= thr_merge_amber:
+                        amber_reasons.append(
+                            f"MERGE conflict rate {cr:.0%} ({merge_summary['conflicts']}/{merge_summary['total']})"
+                        )
+            except Exception:
+                merge_summary = {"error": "merges unavailable"}
+
+        # Resolve final badge — worst signal wins.
+        if red_reasons:
+            badge = "red"
+            reasons = red_reasons + amber_reasons
+        elif amber_reasons:
+            badge = "amber"
+            reasons = amber_reasons
+        else:
+            badge = "green"
+            reasons = []
+
         return {
             "badge": badge,
             "reasons": reasons,
             "last_optimize": last_optimize,
             "last_vacuum": last_vacuum,
+            "vacuum_age_days": round(vacuum_age_days, 1) if vacuum_age_days is not None else None,
+            "failure_rate": round(failure_rate, 3),
             "detail": detail.get("derived"),
             "trend": trend,
             "unclustered_proxy": {
                 "files_since_last_optimize": files_since_last_optimize,
                 "bytes_since_last_optimize": bytes_since_last_optimize,
+                "ratio": round(unclustered_ratio, 3) if unclustered_ratio is not None else None,
             },
+            "merges": merge_summary,
             "po_state": po_state,
             "spike": runs_resp.get("spike"),
         }
@@ -723,3 +880,233 @@ def table_health(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Group rollups — schema or catalog level
+# ---------------------------------------------------------------------------
+
+def _resolve_managed_tables(
+    catalog: str, schema: Optional[str], client, max_tables: int,
+) -> tuple[list[dict], bool]:
+    """List managed Iceberg/Delta tables in scope, capped at max_tables.
+
+    Schema-level: just the schema. Catalog-level: every schema in the catalog.
+    Returns (tables, truncated). Each table dict has catalog/schema/table.
+    """
+    # `catalog` is already validated by the caller. Use escape_ident for the
+    # backtick-quoted form in case some legitimate-but-unusual char slips in.
+    cat_q = escape_ident(catalog)
+
+    # Hard caps to bound work even on adversarial / huge catalogs.
+    # The DESCRIBE EXTENDED budget is what matters most (each is one statement);
+    # the schema cap is a defensive belt-and-suspenders.
+    MAX_SCHEMAS = 100
+    MAX_DESCRIBE_BUDGET = max(max_tables * 4, 100)
+
+    schemas: list[str] = []
+    if schema:
+        schemas = [schema]
+    else:
+        try:
+            r = execute_sql(client, f"SHOW SCHEMAS IN `{cat_q}`")
+            for row in rows_as_dicts(r):
+                name = (row.get("databaseName") or row.get("namespace")
+                        or row.get("database") or "")
+                if name and name.lower() not in ("information_schema",):
+                    schemas.append(name)
+        except Exception:
+            schemas = []
+    if len(schemas) > MAX_SCHEMAS:
+        schemas = schemas[:MAX_SCHEMAS]
+
+    out: list[dict] = []
+    truncated = False
+    describes_used = 0
+    for sch in schemas:
+        if len(out) >= max_tables or describes_used >= MAX_DESCRIBE_BUDGET:
+            truncated = True
+            break
+        # SHOW TABLES returns names that haven't been validated by the route —
+        # escape them defensively before re-interpolating.
+        try:
+            sch_q = escape_ident(sch)
+        except InvalidIdentifier:
+            continue
+        try:
+            show = execute_sql(client, f"SHOW TABLES IN `{cat_q}`.`{sch_q}`")
+            names = [
+                (r.get("tableName") or r.get("table_name"))
+                for r in rows_as_dicts(show)
+            ]
+            for n in names:
+                if not n:
+                    continue
+                if len(out) >= max_tables:
+                    truncated = True
+                    break
+                if describes_used >= MAX_DESCRIBE_BUDGET:
+                    # Schema with many non-managed tables; stop spending the
+                    # describe budget here and move on (or exit if global cap).
+                    truncated = True
+                    break
+                try:
+                    n_q = escape_ident(n)
+                except InvalidIdentifier:
+                    continue
+                # Filter to managed Iceberg/Delta via DESCRIBE EXTENDED
+                describes_used += 1
+                try:
+                    d = execute_sql(client, f"DESCRIBE EXTENDED `{cat_q}`.`{sch_q}`.`{n_q}`")
+                    fmt = ttype = None
+                    for row in d["rows"]:
+                        if not row or not row[0] or len(row) < 2:
+                            continue
+                        k = str(row[0]).strip().lower()
+                        v = (row[1] or "").upper() if row[1] else None
+                        if k == "provider":
+                            fmt = v
+                        elif k == "type":
+                            ttype = v
+                    if ttype == "MANAGED" and fmt in ("ICEBERG", "DELTA"):
+                        out.append({"catalog": catalog, "schema": sch, "table": n})
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return out, truncated
+
+
+def _badge_rank(b: str) -> int:
+    return {"red": 3, "amber": 2, "green": 1, "unknown": 0}.get(b, 0)
+
+
+@router.get("/group_health")
+def group_health(
+    catalog: str,
+    schema: Optional[str] = None,
+    max_tables: int = 50,
+    client=Depends(_user_client),
+):
+    """Aggregate health for an entire schema (if schema=) or catalog (if not).
+
+    Resolves managed Iceberg/Delta tables in scope, then evaluates per-table
+    health for each (parallelized). Returns counts by badge, totals, top
+    offenders, and worst-of overall badge.
+
+    Cost note: each table-level eval issues ~5 SQL queries against the bound
+    warehouse, so a 50-table rollup ~= 250 statements. Cap is set at 50 to
+    keep first-paint reasonable; raise via the `max_tables` query parameter
+    if your warehouse can take it.
+    """
+    _validate_loc(catalog, schema)
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if max_tables <= 0:
+        max_tables = 1
+    elif max_tables > 200:
+        max_tables = 200
+
+    # Capture the request's contextvars (notably WAREHOUSE_OVERRIDE) so worker
+    # threads run their SQL on the user's selected warehouse instead of falling
+    # back to the env default.
+    ctx = contextvars.copy_context()
+
+    members, truncated = _resolve_managed_tables(catalog, schema, client, max_tables)
+
+    counts = {"red": 0, "amber": 0, "green": 0, "unknown": 0, "error": 0}
+    totals = {"size_bytes": 0, "num_files": 0}
+    last_optimize_max: Optional[str] = None
+    last_vacuum_max: Optional[str] = None
+    sum_failure_rate = 0.0
+    failure_samples = 0
+    table_results: list[dict] = []
+
+    def _eval(t: dict) -> dict:
+        try:
+            h = table_health(t["catalog"], t["schema"], t["table"],
+                             include_merges=False, client=client)
+            return {**t, **h, "_ok": True}
+        except Exception as e:
+            return {**t, "badge": "unknown", "reasons": [f"error: {e}"],
+                    "_ok": False, "error": str(e)}
+
+    if members:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            futs = [ex.submit(ctx.run, _eval, t) for t in members]
+            for fut in as_completed(futs):
+                r = fut.result()
+                table_results.append(r)
+                badge = r.get("badge") or "unknown"
+                if not r.get("_ok"):
+                    counts["error"] += 1
+                else:
+                    counts[badge] = counts.get(badge, 0) + 1
+                d = r.get("detail") or {}
+                totals["size_bytes"] += int(d.get("size_bytes") or 0)
+                totals["num_files"] += int(d.get("num_files") or 0)
+                fr = r.get("failure_rate")
+                if isinstance(fr, (int, float)):
+                    sum_failure_rate += float(fr)
+                    failure_samples += 1
+                lo = (r.get("last_optimize") or {}).get("start_time")
+                if lo and (last_optimize_max is None or str(lo) > last_optimize_max):
+                    last_optimize_max = str(lo)
+                lv = (r.get("last_vacuum") or {}).get("start_time")
+                if lv and (last_vacuum_max is None or str(lv) > last_vacuum_max):
+                    last_vacuum_max = str(lv)
+
+    # Worst-of badge: red > amber > green > unknown
+    if counts["red"] > 0:
+        group_badge = "red"
+    elif counts["amber"] > 0:
+        group_badge = "amber"
+    elif counts["green"] > 0:
+        group_badge = "green"
+    else:
+        group_badge = "unknown"
+
+    # Top offenders: sort by badge severity desc, then by # of reasons desc
+    offenders = sorted(
+        [r for r in table_results if r.get("badge") in ("red", "amber")],
+        key=lambda r: (-_badge_rank(r.get("badge", "")),
+                       -len(r.get("reasons") or [])),
+    )[:10]
+
+    avg_file_size = (
+        totals["size_bytes"] // totals["num_files"] if totals["num_files"] > 0 else 0
+    )
+    avg_failure_rate = (
+        round(sum_failure_rate / failure_samples, 3) if failure_samples else 0.0
+    )
+
+    return {
+        "group": {
+            "kind": "schema" if schema else "catalog",
+            "catalog": catalog,
+            "schema": schema,
+        },
+        "badge": group_badge,
+        "total_tables": len(members),
+        "evaluated_tables": len(table_results),
+        "truncated": truncated,
+        "max_tables": max_tables,
+        "counts": counts,
+        "totals": {**totals, "avg_file_size_bytes": avg_file_size},
+        "avg_failure_rate": avg_failure_rate,
+        "last_optimize_max": last_optimize_max,
+        "last_vacuum_max": last_vacuum_max,
+        "offenders": [
+            {
+                "catalog": r["catalog"],
+                "schema": r["schema"],
+                "table": r["table"],
+                "badge": r.get("badge"),
+                "reasons": r.get("reasons") or [],
+                "vacuum_age_days": r.get("vacuum_age_days"),
+                "failure_rate": r.get("failure_rate"),
+            }
+            for r in offenders
+        ],
+    }
