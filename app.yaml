@@ -4,6 +4,8 @@ env:
     valueFrom: 'sql-warehouse'
   - name: 'NODE_ENV'
     value: 'production'
+  # __DEPLOY_INJECT__  (scripts/deploy.sh inserts PO_MONITOR_* values from
+  # scripts/.deploy.env above this marker; do not move)
 
 # OBO (on-behalf-of-user) scopes. The X-Forwarded-Access-Token issued to the
 # app only includes scopes listed here; without them UC calls fall back to
