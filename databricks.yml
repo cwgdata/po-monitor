@@ -1,0 +1,60 @@
+# Databricks Asset Bundle for PO Monitor
+# Deploys the FastAPI + React app to Databricks Apps and binds a SQL warehouse.
+#
+# Usage:
+#   databricks bundle deploy --target dev --var workspace_host=<host> --var warehouse_id=<id>
+#
+# The warehouse binding via `resources.sql_warehouse.id` automatically grants
+# the app's service principal CAN_USE on that warehouse — no manual grant
+# step. The runtime preflight check (lifespan in app.py) verifies this on
+# every cold start and surfaces drift via /api/health.
+bundle:
+  name: po-monitor
+
+# Workspace host is taken from the DATABRICKS_HOST environment variable
+# (bundle limitation — `workspace.host` does not support ${var.*} interpolation).
+# `scripts/deploy.sh` exports it from its first positional arg.
+
+variables:
+  warehouse_id:
+    description: "SQL warehouse ID the app uses for system-table queries (must allow OBO from end users)"
+  app_name:
+    description: "Name of the deployed Databricks App"
+    default: po-monitor
+
+targets:
+  dev:
+    default: true
+    resources:
+      apps:
+        po_monitor:
+          name: ${var.app_name}
+          description: "PO Monitor — observability + maintenance for UC managed Iceberg PO"
+          source_code_path: ${workspace.file_path}
+          # Wire the warehouse as an app resource. Databricks Apps will:
+          #   - inject DATABRICKS_WAREHOUSE_ID into the app env
+          #   - grant the app's service principal CAN_USE on the warehouse
+          resources:
+            - name: sql-warehouse
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: CAN_USE
+          # OBO scopes — the X-Forwarded-Access-Token issued at runtime is
+          # restricted to these. Don't add more than the app actually needs.
+          user_api_scopes:
+            - sql
+
+  prod:
+    resources:
+      apps:
+        po_monitor:
+          name: ${var.app_name}
+          description: "PO Monitor (prod)"
+          source_code_path: ${workspace.file_path}
+          resources:
+            - name: sql-warehouse
+              sql_warehouse:
+                id: ${var.warehouse_id}
+                permission: CAN_USE
+          user_api_scopes:
+            - sql

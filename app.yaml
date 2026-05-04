@@ -1,0 +1,20 @@
+command: ['uvicorn', 'app:app', '--host', '0.0.0.0', '--port', '8000']
+env:
+  - name: 'DATABRICKS_WAREHOUSE_ID'
+    valueFrom: 'sql-warehouse'
+  - name: 'NODE_ENV'
+    value: 'production'
+
+# OBO (on-behalf-of-user) scopes. The X-Forwarded-Access-Token issued to the
+# app only includes scopes listed here; without them UC calls fall back to
+# the app SP and fail on user-owned catalogs.
+# Valid scope names for Databricks Apps OBO (validated via probing the
+# /api/2.0/apps/{name} update endpoint — see notes in README).
+# `iam.current-user:read` is NOT declarable here but is auto-granted.
+user_api_scopes:
+  - sql
+
+# Resource binding is declared in databricks.yml (sql-warehouse -> CAN_USE).
+# Runtime OBO: every data path reads X-Forwarded-Access-Token and calls UC
+# as the logged-in user; the warehouse resource only grants "can use" to the
+# app SP so OBO queries can attach to it.

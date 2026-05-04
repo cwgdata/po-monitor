@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+.env.local
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Keep frontend/dist for deployment
+# frontend/dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Databricks
+.databricks/
+.bundle/
+*.tfstate
+*.tfstate.*
+
+# OS
+.DS_Store
