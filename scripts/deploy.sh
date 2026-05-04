@@ -120,13 +120,15 @@ else
   echo "    no PO_MONITOR_* overrides set; using committed app.yaml as-is"
 fi
 
-echo "==> 4/5  Bind sql-warehouse resource to the app"
+echo "==> 4/5  Bind sql-warehouse resource + set user_api_scopes"
 # The bundle path used to do this; with direct apps deploy we need to call
 # the apps update API explicitly. Idempotent — safe to run on every deploy.
-# Granting CAN_USE here also triggers the workspace to give the app SP that
-# permission on the warehouse, which is what the lifespan preflight checks.
+# Note: the apps update endpoint REPLACES top-level fields rather than
+# merging, so we always need to send `user_api_scopes` alongside `resources`
+# or the OBO token loses the sql scope and every SQL query 403s with
+# "Invalid scope, required scopes: sql".
 databricks apps update "$APP_NAME" --json \
-  "{\"resources\":[{\"name\":\"sql-warehouse\",\"sql_warehouse\":{\"id\":\"$WAREHOUSE_ID\",\"permission\":\"CAN_USE\"}}]}" \
+  "{\"resources\":[{\"name\":\"sql-warehouse\",\"sql_warehouse\":{\"id\":\"$WAREHOUSE_ID\",\"permission\":\"CAN_USE\"}}],\"user_api_scopes\":[\"sql\"]}" \
   > /dev/null
 
 echo "==> 5/5  Deploy app from $WORKSPACE_PATH"
