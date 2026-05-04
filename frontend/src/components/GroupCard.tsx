@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api, type GroupHealthResponse, type GroupRef, type TableRef } from '../lib/api';
+import { Toggle } from './Toggle';
 
 function fmtBytes(n: number | undefined): string {
   if (!n && n !== 0) return '—';
@@ -103,6 +104,27 @@ export function GroupCard({ groupRef, onRemove, onAddTable, autoRefreshSeconds, 
   const totalAll = health?.total_tables ?? 0;
   const truncated = health?.truncated;
 
+  const poState = health?.po_state;
+  const [poBusy, setPoBusy] = useState(false);
+
+  const togglePO = async (next: boolean) => {
+    setPoBusy(true);
+    try {
+      await api.togglePOGroup({
+        kind: groupRef.kind,
+        catalog: groupRef.catalog,
+        schema: groupRef.schema,
+        enabled: next,
+      });
+      // Refresh so we pick up the new po_state from DESCRIBE.
+      refresh();
+    } catch (e: any) {
+      setErr(`Toggle failed: ${e.message || e}`);
+    } finally {
+      setPoBusy(false);
+    }
+  };
+
   return (
     <div className="card">
       <h3 style={{ flexWrap: 'wrap', gap: 8 }}>
@@ -165,6 +187,32 @@ export function GroupCard({ groupRef, onRemove, onAddTable, autoRefreshSeconds, 
       </div>
 
       {err && <div className="spike">Error: {err}</div>}
+
+      {/* PO toggle for the catalog/schema. Setting it here flips the default
+          for every contained table that doesn't have its own override. */}
+      {health && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, fontSize: 11 }}>
+          <span className="muted" style={{ textTransform: 'uppercase', letterSpacing: 0.04 }}>
+            Predictive Optimization
+          </span>
+          <Toggle
+            checked={poState?.enabled === true}
+            disabled={poBusy || poState?.enabled === null}
+            onChange={togglePO}
+            title={
+              poState?.raw
+                ? `Current: ${poState.raw}${poState.inherited ? ' (inherited)' : ''}`
+                : `Toggle PO at the ${groupRef.kind} level`
+            }
+          />
+          {poState?.inherited && (
+            <span className="muted" style={{ fontSize: 10 }}>(inherited)</span>
+          )}
+          {poState?.enabled === null && !err && (
+            <span className="muted" style={{ fontSize: 10 }}>state unknown</span>
+          )}
+        </div>
+      )}
 
       {/* Counts breakdown */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>

@@ -127,6 +127,8 @@ export const api = {
       '/api/actions/vacuum', { method: 'POST', body: JSON.stringify(body) }),
   togglePO: (body: TableRef & { enabled: boolean }) =>
     request('/api/actions/toggle_po', { method: 'POST', body: JSON.stringify(body) }),
+  togglePOGroup: (body: { kind: 'schema' | 'catalog'; catalog: string; schema?: string | null; enabled: boolean }) =>
+    request('/api/actions/toggle_po_group', { method: 'POST', body: JSON.stringify(body) }),
   forceTrigger: (body: TableRef) =>
     request('/api/actions/force_trigger', { method: 'POST', body: JSON.stringify(body) }),
   schedule: (body: TableRef & { operation: string; cron: string; timezone_id: string }) =>
@@ -358,6 +360,11 @@ export type GroupRef = {
 
 export type GroupHealthResponse = {
   group: GroupRef;
+  po_state?: {
+    enabled: boolean | null;
+    raw: string | null;
+    inherited: boolean;
+  };
   badge: 'green' | 'amber' | 'red' | 'unknown';
   total_tables: number;
   evaluated_tables: number;

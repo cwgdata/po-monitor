@@ -1093,12 +1093,37 @@ def group_health(
         round(sum_failure_rate / failure_samples, 3) if failure_samples else 0.0
     )
 
+    # Group-level PO state — what the catalog or schema is set to. Catalog/schema
+    # PO is inherited by tables that don't override; this is what the toggle on
+    # the rollup card flips. Best-effort; nullable on parse failure.
+    po_state: dict = {"enabled": None, "raw": None, "inherited": False}
+    try:
+        cat_q = escape_ident(catalog)
+        if schema:
+            sch_q = escape_ident(schema)
+            de = execute_sql(client, f"DESCRIBE SCHEMA EXTENDED `{cat_q}`.`{sch_q}`")
+        else:
+            de = execute_sql(client, f"DESCRIBE CATALOG EXTENDED `{cat_q}`")
+        for row in de["rows"]:
+            if not row or not row[0] or len(row) < 2:
+                continue
+            if str(row[0]).strip().lower() == "predictive optimization":
+                raw = str(row[1] or "")
+                po_state["raw"] = raw
+                up = raw.upper()
+                po_state["enabled"] = up.startswith("ENABLE")
+                po_state["inherited"] = "INHERIT" in up
+                break
+    except Exception:
+        pass
+
     return {
         "group": {
             "kind": "schema" if schema else "catalog",
             "catalog": catalog,
             "schema": schema,
         },
+        "po_state": po_state,
         "badge": group_badge,
         "total_tables": len(members),
         "evaluated_tables": len(table_results),

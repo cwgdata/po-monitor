@@ -180,6 +180,56 @@ def toggle_po(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class GroupToggleRequest(BaseModel):
+    kind: Literal["schema", "catalog"]
+    catalog: str
+    schema: Optional[str] = None
+    enabled: bool
+
+    @field_validator("catalog", "schema")
+    @classmethod
+    def _check_ident(cls, v, info):
+        if v is None:
+            return v
+        try:
+            return validate_ident(v, info.field_name)
+        except InvalidIdentifier as e:
+            raise ValueError(str(e)) from e
+
+
+@router.post("/toggle_po_group")
+def toggle_po_group(
+    req: GroupToggleRequest,
+    x_forwarded_email: Optional[str] = Header(default=None),
+    client=Depends(_user_client),
+):
+    """Enable/disable PO at the catalog or schema level.
+
+    Catalog/schema-level PO state is inherited by every contained table
+    that doesn't have its own override. Setting it here flips the default
+    for everything beneath. Per-table overrides set via /toggle_po still
+    win (UC inheritance precedence).
+    """
+    if req.kind == "schema":
+        if not req.schema:
+            raise HTTPException(status_code=400, detail="schema is required when kind=schema")
+        target = f"`{req.catalog}`.`{req.schema}`"
+        sql = f"ALTER SCHEMA {target} {'ENABLE' if req.enabled else 'DISABLE'} PREDICTIVE OPTIMIZATION"
+    else:
+        target = f"`{req.catalog}`"
+        sql = f"ALTER CATALOG {target} {'ENABLE' if req.enabled else 'DISABLE'} PREDICTIVE OPTIMIZATION"
+
+    user = x_forwarded_email or "unknown"
+    action_kind = "TOGGLE_PO_SCHEMA" if req.kind == "schema" else "TOGGLE_PO_CATALOG"
+    try:
+        execute_sql(client, sql)
+        _audit(user, action_kind, target, "ok", {"enabled": req.enabled})
+        return {"status": "ok", "target": target, "kind": req.kind, "enabled": req.enabled}
+    except Exception as e:
+        _audit(user, action_kind, target, "error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/force_trigger")
 def force_trigger(
     req: TableRef,
