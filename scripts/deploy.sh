@@ -60,7 +60,7 @@ cd "$REPO_ROOT"
 
 PY="${PYTHON:-python3}"
 
-echo "==> 1/4  Build frontend"
+echo "==> 1/5  Build frontend"
 (cd frontend && npm install --no-audit --no-fund && npm run build)
 
 # Resolve workspace user once for the source-code-path. Use stdlib json only.
@@ -71,13 +71,13 @@ if [[ -z "$ME_EMAIL" ]]; then
 fi
 WORKSPACE_PATH="/Workspace/Users/$ME_EMAIL/$APP_NAME"
 
-echo "==> 2/4  Sync source to $WORKSPACE_PATH"
+echo "==> 2/5  Sync source to $WORKSPACE_PATH"
 databricks sync . "$WORKSPACE_PATH" --full
 
 # Inject any PO_MONITOR_* env vars that .deploy.env defined into the deployed
 # app.yaml. We render to a temp file and overwrite the workspace copy — the
 # local app.yaml is untouched so workspace-specific config never enters git.
-echo "==> 3/4  Inject env overrides into workspace app.yaml"
+echo "==> 3/5  Inject env overrides into workspace app.yaml"
 INJECT_VARS=()
 for v in PO_MONITOR_CATALOG PO_MONITOR_SCHEMA PO_MONITOR_MAINTAINER_EMAIL; do
   if [[ -n "${!v:-}" ]]; then
@@ -120,7 +120,16 @@ else
   echo "    no PO_MONITOR_* overrides set; using committed app.yaml as-is"
 fi
 
-echo "==> 4/4  Deploy app from $WORKSPACE_PATH"
+echo "==> 4/5  Bind sql-warehouse resource to the app"
+# The bundle path used to do this; with direct apps deploy we need to call
+# the apps update API explicitly. Idempotent — safe to run on every deploy.
+# Granting CAN_USE here also triggers the workspace to give the app SP that
+# permission on the warehouse, which is what the lifespan preflight checks.
+databricks apps update "$APP_NAME" --json \
+  "{\"resources\":[{\"name\":\"sql-warehouse\",\"sql_warehouse\":{\"id\":\"$WAREHOUSE_ID\",\"permission\":\"CAN_USE\"}}]}" \
+  > /dev/null
+
+echo "==> 5/5  Deploy app from $WORKSPACE_PATH"
 databricks apps deploy "$APP_NAME" --source-code-path "$WORKSPACE_PATH"
 
 echo

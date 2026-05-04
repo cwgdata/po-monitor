@@ -6,8 +6,9 @@ import { AlertsPanel } from './components/AlertsPanel';
 import { ConfigPanel } from './components/ConfigPanel';
 import { FeedbackModal } from './components/FeedbackModal';
 import { SchedulesPanel } from './components/SchedulesPanel';
+import { WarehouseModal } from './components/WarehouseModal';
 import { useSelection, groupRefKey } from './hooks/useSelection';
-import { api } from './lib/api';
+import { api, setActiveWarehouseId } from './lib/api';
 
 type Tab = 'dashboard' | 'alerts' | 'schedules' | 'config';
 
@@ -18,15 +19,39 @@ export default function App() {
   const [autoRefreshSeconds, setAutoRefreshSeconds] = useState<number>(300);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
 
+  // Warehouse must be picked before any data routes can fire, since every
+  // SQL request needs a warehouse_id. We load /api/config first; if no
+  // warehouse is configured, show the modal and block the rest of the UI.
+  // 'loading' = haven't checked yet, 'ready' = warehouse is set, 'missing' = show modal.
+  const [whState, setWhState] = useState<'loading' | 'ready' | 'missing'>('loading');
+
   useEffect(() => {
+    // whoami doesn't need a warehouse (it just reads headers), so it's safe
+    // to run alongside the config check.
     api.whoami().then(setUser).catch(() => setUser(null));
     api.getConfig()
       .then((c) => {
         const v = c.thresholds?.auto_refresh_seconds;
         if (typeof v === 'number' && v >= 0) setAutoRefreshSeconds(v);
+        const wh = c.warehouse_id_override || c.warehouse_id || '';
+        if (wh) {
+          setActiveWarehouseId(wh);
+          setWhState('ready');
+        } else {
+          setWhState('missing');
+        }
       })
-      .catch(() => {});
+      .catch(() => {
+        // /api/config failure shouldn't trap the user — if the backend can't
+        // tell us the warehouse, surface the picker so they can set one.
+        setWhState('missing');
+      });
   }, []);
+
+  const onWarehousePicked = (id: string) => {
+    setActiveWarehouseId(id);
+    setWhState('ready');
+  };
 
   const changeAutoRefresh = (seconds: number) => {
     setAutoRefreshSeconds(seconds);
@@ -53,22 +78,28 @@ export default function App() {
         </h1>
         <div className="subtitle">Predictive Optimization · Iceberg + Delta</div>
 
-        <Selector
-          catalog={sel.catalog}
-          schema={sel.schema}
-          tables={sel.tables}
-          groups={sel.groups}
-          onCatalog={sel.setCatalog}
-          onSchema={sel.setSchema}
-          onToggleTable={sel.toggleTable}
-          onClear={sel.clearTables}
-          onSetTables={sel.setTables}
-          onToggleGroup={sel.toggleGroup}
-          isGroupSelected={sel.isGroupSelected}
-          autoRefreshSeconds={autoRefreshSeconds}
-          onAutoRefreshChange={changeAutoRefresh}
-          userEmail={user?.email || null}
-        />
+        {whState === 'ready' ? (
+          <Selector
+            catalog={sel.catalog}
+            schema={sel.schema}
+            tables={sel.tables}
+            groups={sel.groups}
+            onCatalog={sel.setCatalog}
+            onSchema={sel.setSchema}
+            onToggleTable={sel.toggleTable}
+            onClear={sel.clearTables}
+            onSetTables={sel.setTables}
+            onToggleGroup={sel.toggleGroup}
+            isGroupSelected={sel.isGroupSelected}
+            autoRefreshSeconds={autoRefreshSeconds}
+            onAutoRefreshChange={changeAutoRefresh}
+            userEmail={user?.email || null}
+          />
+        ) : (
+          <div className="muted" style={{ padding: 12, fontSize: 12 }}>
+            {whState === 'loading' ? 'Loading…' : 'Pick a SQL warehouse to begin.'}
+          </div>
+        )}
       </aside>
 
       <main className="main">
@@ -100,6 +131,14 @@ export default function App() {
             data, spinners, running-op state). Each panel keeps its own polls
             running in the background — low cost, and data is already warm
             when the user comes back. */}
+        {whState !== 'ready' ? (
+          <div className="empty-state">
+            {whState === 'loading'
+              ? 'Loading…'
+              : 'Pick a SQL warehouse to begin. Use the dialog at the right of the screen.'}
+          </div>
+        ) : (
+        <>
         <div style={{ display: tab === 'dashboard' ? 'block' : 'none' }}>
           {sel.tables.length === 0 && sel.groups.length === 0 ? (
             <div className="empty-state">
@@ -141,6 +180,8 @@ export default function App() {
         <div style={{ display: tab === 'config' ? 'block' : 'none' }}>
           <ConfigPanel />
         </div>
+        </>
+        )}
 
         {feedbackOpen && (
           <FeedbackModal
@@ -148,6 +189,8 @@ export default function App() {
             onClose={() => setFeedbackOpen(false)}
           />
         )}
+
+        {whState === 'missing' && <WarehouseModal onSaved={onWarehousePicked} />}
       </main>
     </div>
   );
