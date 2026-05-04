@@ -193,12 +193,11 @@ def force_trigger(
     same operations PO would run. Both submitted in parallel via threads
     so the HTTP request returns in ~5s rather than ~10s sequential.
     """
-    import contextvars
     from concurrent.futures import ThreadPoolExecutor
+    from ..config import WAREHOUSE_OVERRIDE, get_warehouse_id as _gwh
 
     full = f"`{req.catalog}`.`{req.schema}`.`{req.table}`"
     user = x_forwarded_email or "unknown"
-    from ..config import get_warehouse_id as _gwh
     try:
         wh_used = _gwh()
     except Exception as e:
@@ -216,12 +215,15 @@ def force_trigger(
         ("VACUUM_LITE", f"VACUUM {full} LITE"),
     )
 
-    # Capture contextvars so the WAREHOUSE_OVERRIDE set by middleware
-    # follows the worker threads (same fix as group_health).
-    ctx = contextvars.copy_context()
+    # Snapshot the warehouse override and re-set it in each worker. We can't
+    # share a single Context object across threads (Context.run raises if
+    # entered concurrently). Each worker reads/sets WAREHOUSE_OVERRIDE on its
+    # own thread's context.
+    wh_override = WAREHOUSE_OVERRIDE.get()
 
     def _submit(label_sql):
         label, sql = label_sql
+        token = WAREHOUSE_OVERRIDE.set(wh_override) if wh_override is not None else None
         try:
             res = execute_sql(client, sql, wait_timeout="5s", fire_and_forget=True)
             return label, {
@@ -231,9 +233,12 @@ def force_trigger(
             }, None
         except Exception as e:
             return label, None, str(e)
+        finally:
+            if token is not None:
+                WAREHOUSE_OVERRIDE.reset(token)
 
     with ThreadPoolExecutor(max_workers=len(statements)) as ex:
-        for label, ok, err in ex.map(lambda s: ctx.run(_submit, s), statements):
+        for label, ok, err in ex.map(_submit, statements):
             if ok is not None:
                 submitted[label] = ok
             if err is not None:

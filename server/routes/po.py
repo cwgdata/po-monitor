@@ -1000,18 +1000,19 @@ def group_health(
     if your warehouse can take it.
     """
     _validate_loc(catalog, schema)
-    import contextvars
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from ..config import WAREHOUSE_OVERRIDE
 
     if max_tables <= 0:
         max_tables = 1
     elif max_tables > 200:
         max_tables = 200
 
-    # Capture the request's contextvars (notably WAREHOUSE_OVERRIDE) so worker
-    # threads run their SQL on the user's selected warehouse instead of falling
-    # back to the env default.
-    ctx = contextvars.copy_context()
+    # Snapshot the per-request warehouse override on the main thread so each
+    # worker can re-set its own contextvar. We can't share a single Context
+    # across threads — Context.run raises "cannot enter context" if called
+    # concurrently from multiple threads on the same Context object.
+    wh_override = WAREHOUSE_OVERRIDE.get()
 
     members, truncated = _resolve_managed_tables(catalog, schema, client, max_tables)
 
@@ -1024,6 +1025,7 @@ def group_health(
     table_results: list[dict] = []
 
     def _eval(t: dict) -> dict:
+        token = WAREHOUSE_OVERRIDE.set(wh_override) if wh_override is not None else None
         try:
             h = table_health(t["catalog"], t["schema"], t["table"],
                              include_merges=False, client=client)
@@ -1031,12 +1033,22 @@ def group_health(
         except Exception as e:
             return {**t, "badge": "unknown", "reasons": [f"error: {e}"],
                     "_ok": False, "error": str(e)}
+        finally:
+            if token is not None:
+                WAREHOUSE_OVERRIDE.reset(token)
 
     if members:
         with ThreadPoolExecutor(max_workers=8) as ex:
-            futs = [ex.submit(ctx.run, _eval, t) for t in members]
+            futs = [ex.submit(_eval, t) for t in members]
             for fut in as_completed(futs):
-                r = fut.result()
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    # Worker raised something we didn't catch — record as error
+                    # rather than propagating and 500'ing the whole rollup.
+                    r = {"catalog": "?", "schema": "?", "table": "?",
+                         "badge": "unknown", "reasons": [f"worker: {e}"],
+                         "_ok": False, "error": str(e)}
                 table_results.append(r)
                 badge = r.get("badge") or "unknown"
                 if not r.get("_ok"):
