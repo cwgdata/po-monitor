@@ -446,7 +446,7 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
   })();
 
   const sizeChart = sizeSeries.length > 1 ? (
-    <div style={{ height: 140, marginBottom: 12 }}>
+    <div style={{ height: 90, marginBottom: 8 }}>
       <div className="label" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Table size over time ({sizeSeries.length} commits)</div>
       <ResponsiveContainer>
         <LineChart data={sizeSeries} margin={{ top: 6, right: 12, left: 44, bottom: 22 }}>
@@ -470,7 +470,7 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
       .map((r) => ({ ts: r.start_time?.slice(5, 10), files: r.files_compacted || 0 }));
     if (data.length === 0) return null;
     return (
-      <div style={{ height: 160, marginBottom: 12 }}>
+      <div style={{ height: 110, marginBottom: 8 }}>
         <div className="label" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Files compacted per OPTIMIZE / COMPACTION run</div>
         <ResponsiveContainer>
           <LineChart data={data} margin={{ top: 6, right: 12, left: 36, bottom: 22 }}>
@@ -488,7 +488,7 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
   })();
 
   const dailyFilesChart = trends && trends.files_bytes.length > 1 ? (
-    <div style={{ height: 140, marginBottom: 12 }}>
+    <div style={{ height: 90, marginBottom: 8 }}>
       <div className="label" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>Daily file count (30d)</div>
       <ResponsiveContainer>
         <LineChart data={trends.files_bytes.map((r) => ({ date: r.date.slice(5), files: r.files }))}
@@ -506,7 +506,7 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
   ) : null;
 
   const dvsRemovedChart = trends && trends.dv_removed.length > 0 ? (
-    <div style={{ height: 140, marginBottom: 12 }}>
+    <div style={{ height: 90, marginBottom: 8 }}>
       <div className="label" style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 4 }}>DVs removed per OPTIMIZE run</div>
       <ResponsiveContainer>
         <BarChart data={trends.dv_removed.map((r) => ({ ts: (r.ts || '').slice(5, 10), dvs: r.dvs_removed }))}
