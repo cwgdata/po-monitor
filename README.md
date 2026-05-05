@@ -102,8 +102,11 @@ Each card shows:
   ops (from `DESCRIBE HISTORY`). Each row indicates source and status.
 - **MERGE activity (24h)** — count, conflict rate, and recent failure
   samples from `system.query.history`.
-- **Action buttons** — OPTIMIZE, VACUUM LITE/FULL, enable/disable PO,
-  Force PO, Schedule.
+- **Action buttons** — OPTIMIZE, VACUUM LITE/FULL, Schedule.
+  PO enable/disable is intentionally a schema/catalog-level control only
+  (see rollup cards) — per-table overrides are not exposed to avoid
+  fragmenting policy. The Force PO button is currently hidden pending
+  a rewrite against a new upstream API.
 
 ### Health badge ruleset
 

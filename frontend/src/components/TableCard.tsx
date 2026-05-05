@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { LineChart, Line, BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { api, getActiveWarehouseId, type HealthResponse, type PoRun, type TableRef } from '../lib/api';
-import { Toggle } from './Toggle';
 
 // Inline SVG icons — simple, crisp at 14px, stroke uses currentColor so they
 // inherit the button color scheme. Material/Feather conventions.
@@ -600,51 +599,9 @@ export function TableCard({ tableRef, onRemove, autoRefreshSeconds = 60 }: Props
           { details: 'Permanently removes unreferenced files. Cannot be undone.', danger: true })}>
         {opStatus['VACUUM'] ? statusLabel('VACUUM', '') : 'VACUUM FULL'}
       </button>
-      {(() => {
-        const poOn = health?.po_state?.enabled === true;
-        const poKnown = health?.po_state?.enabled != null;
-        const nextState = !poOn;
-        const busyText = opStatus['PO_TOGGLE'] ? statusLabel('PO_TOGGLE', '') : null;
-        return (
-          <span
-            className="btn"
-            style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'default', padding: '6px 12px' }}
-            title={health?.po_state?.raw ? `Current: ${health.po_state.raw}` : ''}
-          >
-            <span className="muted" style={{ fontSize: 11 }}>PO</span>
-            <Toggle
-              checked={poOn}
-              disabled={!poKnown || isBusy('PO_TOGGLE')}
-              label={busyText || undefined}
-              onChange={() => askConfirm('PO_TOGGLE',
-                nextState ? 'Enable PO' : 'Disable PO',
-                fullName,
-                async () => {
-                  const r = await api.togglePO({ ...tableRef, enabled: nextState });
-                  setTimeout(() => {
-                    setOpStatus((s) => { const n = { ...s }; delete n['PO_TOGGLE']; return n; });
-                    refresh();
-                  }, 1500);
-                  return r;
-                },
-                { details: `Current: ${health?.po_state?.raw || '?'}` },
-              )}
-            />
-          </span>
-        );
-      })()}
-      <button
-        className="btn"
-        disabled={isBusy('FORCE_PO')}
-        onClick={() => askConfirm('FORCE_PO', 'Force PO', fullName,
-          async () => {
-            const r = await api.forceTrigger(tableRef).catch((e) => { throw e; });
-            setTimeout(() => setOpStatus((s) => { const n = { ...s }; delete n['FORCE_PO']; return n; }), 1500);
-            return r;
-          },
-          { details: 'Submits OPTIMIZE + VACUUM LITE as a stand-in for the PO scheduler.' })}>
-        {statusLabel('FORCE_PO', 'Force PO')}
-      </button>
+      {/* Force PO button hidden — pending rewrite against a new upstream API.
+          The /api/actions/force_trigger endpoint and api.forceTrigger client
+          method remain in place for that rewrite. */}
       <button
         className="btn"
         disabled={isBusy('SCHEDULE')}
