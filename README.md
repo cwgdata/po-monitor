@@ -1,213 +1,317 @@
 # PO Monitor
 
-Databricks App for monitoring **Predictive Optimization (PO)** on Unity Catalog managed Iceberg tables. Built for SAs / customer data platform teams operating UC managed Iceberg at scale (PB-class, external writers like EMR Spark/Flink).
+A self-contained Databricks App for **observing and operating Predictive
+Optimization (PO)** on Unity Catalog managed Iceberg and Delta tables.
 
-> **Disclaimer.** This project is provided **as-is**, without warranty of any kind, express or implied (including merchantability, fitness for a particular purpose, and non-infringement). It is **not an official Databricks product** and is not supported by Databricks. Use at your own risk; the authors and contributors accept no liability for any damages or data loss arising from its use. Review the code and verify behavior against your own environment before relying on it.
+Built for data platform teams running UC managed Iceberg/Delta at scale —
+PB-class tables, external writers (EMR Spark/Flink), and the kind of
+operational concerns that come with both. PO Monitor surfaces whether PO
+is keeping up, where it isn't, and gives you the buttons to do something
+about it without leaving the app.
 
-Quick install:
+> **Disclaimer.** PO Monitor is provided **as-is**, without warranty of any
+> kind. It is **not an official Databricks product** and is not supported
+> by Databricks. Review the source and validate behavior in your environment
+> before relying on it.
 
-```bash
-git clone <repo> po-monitor && cd po-monitor
-./scripts/deploy.sh https://<your-workspace>.cloud.databricks.com <warehouse_id>
-```
+---
 
-That single command builds the frontend, syncs source to your workspace, creates/updates the Databricks App, and binds the SQL warehouse with the right SP grants. Read `## Deploy` below for prereqs.
+## What you get
 
-## Stack
+**A live read on PO health for every table you care about.** Per-table cards
+roll up DESC DETAIL metrics, PO run history, MERGE activity, and trend
+deltas into a single green / amber / red badge with the reasons spelled out.
 
-- **Backend**: FastAPI (Python) — chosen over Node for first-class Databricks SDK + Statement Execution support.
-- **Frontend**: React + Vite + TypeScript. Recharts for trend sparklines.
-- **Auth**: OAuth on-behalf-of-user (OBO) via `X-Forwarded-Access-Token` header that Databricks Apps injects. Every data-read and every maintenance action runs as the logged-in user so UC ACLs are enforced. No PAT, no hardcoded tokens.
-- **SQL path**: Databricks Statement Execution API (via `databricks-sdk`). Warehouse bound as an app resource (`sql-warehouse` → `DATABRICKS_WAREHOUSE_ID`).
+**Catalog and schema rollups.** Add a single card that aggregates badge
+counts, totals, and top offenders across every managed Iceberg/Delta table
+in a catalog or schema — useful when you have hundreds of tables and need
+a "where should I look?" view.
 
-## Directory tree
+**Maintenance buttons.** Trigger OPTIMIZE, VACUUM (LITE or FULL), enable /
+disable PO at the table or catalog/schema level, and a "Force PO" stand-in
+that submits OPTIMIZE + VACUUM LITE as the user. Every action is audited
+to a Unity Catalog table.
 
-```
-po-monitor/
-  app.py                     # FastAPI entry, mounts routers + React dist
-  app.yaml                   # Databricks App config
-  requirements.txt
-  .gitignore
-  server/
-    config.py                # Dual-mode auth helpers, thresholds
-    sql_client.py            # Statement Execution wrapper
-    routes/
-      catalog.py             # /api/catalog/* — catalogs/schemas/tables
-      po.py                  # /api/po/* — PO runs, desc detail, health, group rollups, merges
-      actions.py             # /api/actions/* — OPTIMIZE/VACUUM/toggle/force-trigger/audit
-      alerts.py              # /api/alerts/* — rule CRUD + on-demand /test
-      schedules.py           # /api/schedules/* — cron + trigger schedules
-      dashboards.py          # /api/dashboards/* — saved dashboard configs (per-user)
-      feedback.py            # /api/feedback — submission → notification destinations
-      card_cache.py          # /api/card-cache — last-known card payload, per user
-      config.py              # /api/config — runtime config
-    db.py                    # UC bootstrap + persistence helpers (config, audit, alerts, schedules…)
-    alerts_engine.py         # Alert evaluation tick loop (asyncio task)
-    alerts_dispatch.py       # Slack webhook + Databricks email destination delivery
-    scheduler.py             # Schedule firing tick loop (asyncio task)
-    sql_client.py            # Statement Execution wrapper
-  sql/
-    po_runs.sql              # PO system-table query
-    desc_detail.sql          # DESC DETAIL extract
-    list_managed_iceberg.sql # UC info_schema query
-  frontend/
-    package.json  vite.config.ts  tsconfig.json  index.html
-    src/
-      App.tsx  main.tsx  styles.css
-      hooks/useSelection.ts  # tables[] + groups[] + persistence
-      lib/api.ts
-      components/
-        Selector.tsx         # Catalog → Schema → Table cascade + rollup buttons
-        TableCard.tsx        # Per-table dashboard tile
-        GroupCard.tsx        # Schema/catalog rollup tile
-        AlertsPanel.tsx  ConfigPanel.tsx  SchedulesPanel.tsx
-        FeedbackModal.tsx  Toggle.tsx
-```
+**Alerts.** Configure rule-based alerts (VACUUM age, OPTIMIZE failure rate,
+MERGE conflict spikes, custom thresholds) with delivery via Slack webhooks
+or Databricks email notification destinations. A background loop evaluates
+rules on a schedule.
 
-## Run locally
+**Schedules.** Cron and trigger-based schedules for OPTIMIZE / VACUUM
+operations, persisted in UC and fired by an in-app tick loop.
 
-### Prereqs
+**On-behalf-of-user authorization.** Every data read and every maintenance
+action runs as the logged-in user. Unity Catalog ACLs are enforced
+per-request — no service principal bypass for end-user operations.
 
-- Python 3.11+, Node 18+
-- Databricks CLI v0.260+, authenticated against the target workspace (`databricks auth login`)
-- A SQL warehouse ID
+---
 
-### Backend
+## Quick start
 
 ```bash
-cp .env.example .env       # edit with your host + warehouse ID
+git clone https://github.com/cwgdata/po-monitor.git
+cd po-monitor
+
+# Copy the example, fill in your workspace host + warehouse id
+cp scripts/deploy.env.example scripts/.deploy.env
+$EDITOR scripts/.deploy.env
+
+./scripts/deploy.sh
+```
+
+Open the deployed app from **Compute → Apps** in your workspace, sign in,
+and pick a warehouse from the modal that appears on first run. The sidebar
+selector lets you browse catalogs and pick tables; rollup cards add via the
+**+ rollup** button next to the catalog or schema dropdown.
+
+### Prerequisites
+
+- Databricks CLI v0.260+ ([install guide](https://docs.databricks.com/dev-tools/cli/index.html))
+- Node 18+ and npm
+- Authenticated against the target workspace (`databricks auth login --host …`)
+- A Unity-Catalog-enabled workspace
+- A SQL warehouse the app's service principal can use
+
+### Workspace permissions
+
+The user running `deploy.sh` needs:
+
+- `CAN_MANAGE` on the workspace (to create the app)
+- `CAN_USE` on the chosen SQL warehouse
+- Write access under `/Workspace/Users/<you>/`
+
+End users querying through the app need their own UC privileges plus
+`CAN_USE` on a warehouse (the one they pick from the sidebar dropdown).
+
+---
+
+## Features
+
+### Per-table health
+
+Each card shows:
+
+- **Composite badge** — green / amber / red, computed from the full ruleset
+  below. Triggered signals are listed under the badge.
+- **KPIs** — file count, total size, average file size (with 7-day trend
+  arrows), DV count where available.
+- **Trend chart** — file count over the last 30 days, derived from PO
+  OPTIMIZE runs.
+- **Recent operations** — unified view of PO-driven runs (from
+  `system.storage.predictive_optimization_operations_history`) and manual
+  ops (from `DESCRIBE HISTORY`). Each row indicates source and status.
+- **MERGE activity (24h)** — count, conflict rate, and recent failure
+  samples from `system.query.history`.
+- **Action buttons** — OPTIMIZE, VACUUM LITE/FULL, enable/disable PO,
+  Force PO, Schedule.
+
+### Health badge ruleset
+
+| Signal | Threshold (default) | Severity |
+|---|---|---|
+| OPTIMIZE failure rate | > 30% | Red |
+| OPTIMIZE failure rate | ≥ 10% | Amber |
+| Days since last VACUUM | > 30 | Red |
+| Days since last VACUUM | > 14 | Amber |
+| MERGE conflict rate (24h, ≥3 samples) | > 30% | Red |
+| MERGE conflict rate (24h, ≥3 samples) | ≥ 10% | Amber |
+| Unclustered ratio (bytes since OPTIMIZE / size) | > 20% | Amber |
+| Avg file size drop (7d) | > 15% | Amber |
+
+All thresholds are user-overridable on the Config page.
+
+### Schema and catalog rollups
+
+The **+ rollup** buttons add a card that fans out across every managed
+Iceberg/Delta table in the chosen catalog or schema. The rollup shows:
+
+- A worst-of badge (red if any table is red, amber if any is amber).
+- Counts by badge.
+- Aggregate totals (size, files, average file size).
+- Mean OPTIMIZE failure rate, most recent OPTIMIZE / VACUUM across the group.
+- Top 10 offenders, sorted by severity, with a one-click button to spawn
+  a per-table card.
+- A toggle to enable/disable PO at the catalog or schema level (inherited
+  by tables that don't override).
+
+Defaults to evaluating up to 50 tables; raise via the `max_tables` query
+parameter on `/api/po/group_health` if your warehouse can take it.
+
+### Alerts
+
+- Rule types: VACUUM age, OPTIMIZE failure rate, MERGE conflict spike,
+  custom threshold.
+- Per-rule overrides for Slack webhook and email recipient; falls back to
+  the user's defaults, then global defaults.
+- Background evaluation tick loop runs continuously in the deployed app.
+- Email delivery uses Databricks notification destinations — auto-created
+  on first send if one doesn't already point at the recipient.
+
+### Schedules
+
+Cron expressions or trigger-based polling (DESCRIBE HISTORY for new commits).
+Schedules persist in UC and fire from a tick loop in the running app. Each
+fire is audited.
+
+### Saved dashboards
+
+Per-user named dashboards persist your selected tables across devices.
+
+---
+
+## Configuration
+
+### `scripts/.deploy.env` (gitignored, local only)
+
+Per-deployment settings. Copy `scripts/deploy.env.example` to
+`scripts/.deploy.env` and edit:
+
+```bash
+WORKSPACE_HOST=https://<your-workspace>.cloud.databricks.com
+WAREHOUSE_ID=<warehouse-id>
+TARGET=dev                          # optional
+
+# UC catalog/schema where the app stores its state. The app SP needs
+# CREATE SCHEMA + CREATE TABLE on the catalog at first boot. Defaults to
+# main / po_monitor; most workspaces lock down `main`, so point at a
+# catalog the app SP can write to.
+PO_MONITOR_CATALOG=
+PO_MONITOR_SCHEMA=
+
+# Optional: maintainer email for in-app feedback delivery
+PO_MONITOR_MAINTAINER_EMAIL=
+```
+
+`deploy.sh` reads this file and injects the `PO_MONITOR_*` values into the
+deployed `app.yaml` at deploy time. The file is gitignored, so workspace
+configuration never lands in source control.
+
+### Runtime environment variables
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABRICKS_WAREHOUSE_ID` | (resource-bound) | Default SQL warehouse. Set automatically via the `sql-warehouse` app resource binding; users can override via the sidebar dropdown. |
+| `PO_MONITOR_CATALOG` | `main` | UC catalog for app state (config, alerts, audit, schedules, feedback). |
+| `PO_MONITOR_SCHEMA` | `po_monitor` | UC schema. Created on first boot. |
+| `PO_MONITOR_MAINTAINER_EMAIL` | (unset) | Where in-app feedback is delivered. Unset → UC table only. |
+| `PO_MONITOR_DEBUG` | `0` | When truthy, returns full tracebacks on 500 responses. **Production: leave unset.** |
+
+### Persistent state
+
+PO Monitor's own configuration, alert rules, schedules, audit log, and
+feedback are persisted in `${PO_MONITOR_CATALOG}.${PO_MONITOR_SCHEMA}.*`.
+Tables are bootstrapped idempotently on app startup.
+
+---
+
+## Architecture
+
+```
+Browser
+   │  X-Forwarded-Access-Token  ┌─────────────┐
+   ▼                            │   Browser   │
+┌─────────────────────────┐     │             │
+│  Databricks Apps proxy  │     │  Sidebar +  │
+│  (OAuth, OBO injection) │     │   cards     │
+└──────────┬──────────────┘     └─────────────┘
+           │  HTTP + headers           ▲
+           ▼                           │
+┌─────────────────────────────────────────────────┐
+│  FastAPI app (PO Monitor)                       │
+│   /api/catalog        catalogs/schemas/tables   │
+│   /api/po/*           runs, health, group_health│
+│   /api/actions/*      OPTIMIZE/VACUUM/toggle    │
+│   /api/alerts /sched. CRUD + tick loops         │
+│   /api/config         thresholds, warehouse     │
+│                                                 │
+│   Statement Execution API (per-request OBO)     │
+└──────────┬──────────────────────────────────────┘
+           ▼
+┌──────────────────────────────────────────────┐
+│ SQL warehouse  →  Unity Catalog              │
+│   user tables                                │
+│   system.storage.predictive_optimization_*   │
+│   system.query.history                       │
+│   system.storage.table_metrics_history       │
+│   ${PO_MONITOR_CATALOG}.po_monitor.*  (state)│
+└──────────────────────────────────────────────┘
+```
+
+- **Backend:** FastAPI (Python 3.11+).
+- **Frontend:** React + Vite + TypeScript, Recharts for sparklines.
+- **Auth:** OAuth on-behalf-of-user (OBO) via the `X-Forwarded-Access-Token`
+  header that Databricks Apps injects. Every data-read runs as the logged-in
+  user; UC ACLs are enforced. The app's service principal is used only for
+  app-internal state writes (audit, alert rule storage, etc.).
+- **SQL path:** Databricks Statement Execution API via `databricks-sdk`.
+- **No PATs, no hardcoded tokens** — auth is always either the OBO user
+  token or the resource-bound app SP credentials.
+
+---
+
+## Local development
+
+```bash
+# Backend
+cp .env.example .env       # set DATABRICKS_HOST + DATABRICKS_WAREHOUSE_ID
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# load env then run
 set -a; source .env; set +a
 uvicorn app:app --reload --port 8000
-```
 
-API docs at http://localhost:8000/docs.
-
-### Frontend
-
-```bash
+# Frontend (separate terminal)
 cd frontend
 npm install
-npm run dev        # vite dev server on :5173, proxies /api → :8000
+npm run dev                # vite on :5173, proxies /api → :8000
 ```
 
-Visit http://localhost:5173.
+Visit http://localhost:5173. API docs at http://localhost:8000/docs.
 
-### Build for deployment (manual)
+For a production-style preview locally:
 
 ```bash
-cd frontend && npm run build     # outputs frontend/dist/
-cd ..
-# FastAPI auto-serves frontend/dist/ if present. Verify by hitting :8000 directly.
+cd frontend && npm run build && cd ..
+uvicorn app:app --port 8000   # FastAPI now serves frontend/dist/
 ```
 
-## Deploy
+---
 
-### One-shot
+## Updating
 
 ```bash
-./scripts/deploy.sh https://<workspace>.cloud.databricks.com <warehouse_id> [target]
+git pull
+./scripts/deploy.sh
 ```
 
-What it does:
-1. `npm run build` for the frontend
-2. `databricks bundle validate` (Asset Bundle in `databricks.yml`)
-3. `databricks bundle deploy` — syncs source + creates/updates the app + binds the SQL warehouse resource (auto-grants SP `CAN_USE`)
-4. `databricks bundle run po_monitor` — starts the app
+`deploy.sh` is idempotent — it rebuilds the frontend, syncs source, refreshes
+the warehouse resource binding, and triggers a redeploy. The app does a
+zero-downtime swap once the new container is healthy.
 
-Targets in the bundle: `dev` (default), `prod`. Add more by extending `databricks.yml` → `targets:`.
+---
 
-### Verify after deploy
+## Limitations
 
-Open the app, check **`/api/health`**:
+- **Force PO is a stand-in.** Databricks doesn't expose a public endpoint
+  to force the PO scheduler. The "Force PO" button submits OPTIMIZE +
+  VACUUM LITE in parallel as the OBO user — the same operations PO would
+  run, but on demand.
+- **7-day trend charts** depend on the
+  `system.storage.table_metrics_history` daily-snapshot table. Tables
+  without snapshots return null deltas.
+- **PO system-table schema** can change between Databricks runtimes.
+  The PO history query handles unknown columns gracefully and surfaces a
+  `spike` field on the response if the underlying table isn't found.
+- **App logs** require OAuth-U2M auth on the Databricks CLI. PAT auth
+  works for everything else but `databricks apps logs` will return
+  *OAuth Token not supported for current auth type*.
 
-```json
-{
-  "ok": true,
-  "bootstrap": { ... },
-  "warehouse_preflight": { "ok": true, "message": "SP CAN_USE warehouse <id>" }
-}
-```
+---
 
-If `warehouse_preflight.ok` is `false`, the message includes the exact `databricks api put` to add `CAN_USE` for the app's service principal. The bundle resource binding should set this automatically — drift only happens if the warehouse is recreated or its ACL is reset out-of-band.
+## Releases
 
-### Required workspace permissions
+See [`CHANGELOG.md`](./CHANGELOG.md). Tagged versions follow semver.
 
-To deploy, the user running `deploy.sh` needs:
-- `CAN_MANAGE` on the target workspace (to create the app)
-- `CAN_USE` on the chosen warehouse (so resource binding can grant it forward to the app SP)
-- Permission to write under `/Workspace/Users/<you>/.bundle/po-monitor/`
+## License
 
-The runtime app SP automatically inherits `CAN_USE` on the bound warehouse. End users running OBO queries need their own warehouse + UC privileges.
-
-## The one real end-to-end path
-
-1. Sidebar **Selector** calls `GET /api/catalog/catalogs` → `GET /api/catalog/schemas?catalog=` → `GET /api/catalog/tables?catalog=&schema=&iceberg_only=true`. Each request flows through `get_user_client()` which honors OBO from the proxy header.
-2. User checks one or more tables (persisted to URL + localStorage).
-3. For each selected table, `TableCard` calls:
-   - `GET /api/po/health?catalog=&schema=&table=` — rolls up `DESC DETAIL` + PO run history into a green/amber/red badge
-   - `GET /api/po/runs?...&lookback_days=30` — recent PO operations table + sparkline
-4. PO runs come from `system.storage.predictive_optimization_operations_history` (see spike note below).
-
-Every data read is authorized as the logged-in user.
-
-## What's real vs stubbed
-
-| Feature | Status | Notes |
-|---|---|---|
-| Catalog/schema/table cascade | REAL | `/api/catalog/*`, filters to managed Iceberg via `information_schema.tables` |
-| Multi-select, 20-table cap | REAL | `useSelection` hook, URL + localStorage persistence |
-| Schema / catalog rollup cards | REAL | `/api/po/group_health` aggregates badge counts + totals + top offenders across every managed Iceberg/Delta table in the grouping. Add via "+ rollup" buttons in the sidebar |
-| `DESC DETAIL` KPIs (num files, size, avg size) | REAL | `/api/po/detail` |
-| PO run history + status table | REAL (SPIKE) | Queries `system.storage.predictive_optimization_operations_history`; graceful empty + spike note if system table name differs |
-| Health badge | REAL | Full ruleset: OPTIMIZE failure rate, VACUUM age, unclustered ratio, 7d avg-size drop. Thresholds editable on Config page |
-| File-count trend sparkline | REAL | Derived from `files_compacted` across OPTIMIZE runs |
-| Avg file size trend (7d) | REAL | Compared against `system.storage.table_metrics_history` snapshot |
-| DV count | REAL | From `DESC DETAIL` (when DBR exposes it); else null and surfaced as "n/a" |
-| Unclustered ratio (proxy) | REAL | bytes_added since last OPTIMIZE / current size_bytes — surfaced via `unclustered_proxy.ratio` |
-| Time since OPTIMIZE / VACUUM | REAL | Computed server-side from run history; `vacuum_age_days` in /api/po/health |
-| MERGE conflict rate | REAL | `/api/po/merges` queries `system.query.history` for MERGE statements; classifies failures by `DELTA_CONCURRENT_*` error pattern. Surfaced as a tile + recent-queries table on each card, factored into the health badge, and available as the `MERGE_CONFLICT_SPIKE` alert rule type |
-| OPTIMIZE button | REAL | Statement Execution, fire-and-forget. Returns statement_id so UI can poll |
-| VACUUM LITE / FULL buttons | REAL | Same pattern; FULL confirm modal wired |
-| Enable / Disable PO toggle | REAL | `ALTER TABLE … {ENABLE\|DISABLE} PREDICTIVE OPTIMIZATION` |
-| Force PO trigger | REAL | Stand-in: submits OPTIMIZE + VACUUM LITE as the OBO user (PO scheduler has no public force endpoint) |
-| Schedule OPTIMIZE / VACUUM | REAL | Cron + trigger schedules persisted in UC; background tick loop in `server/scheduler.py` |
-| Audit log | REAL | Persisted to `${PO_MONITOR_CATALOG}.po_monitor.audit`, 100-row default page |
-| Alerts: rule CRUD | REAL | Persisted to `${PO_MONITOR_CATALOG}.po_monitor.alert_rules` |
-| Alerts: Slack webhook delivery | REAL | `server/alerts_dispatch.py` — webhook resolved per-rule → user → global |
-| Alerts: evaluation loop | REAL | `server/alerts_engine.py` runs as a background asyncio task in lifespan |
-| Email delivery | REAL | Via Databricks notification destinations, auto-created on first send |
-| Config page | REAL | View + patch global thresholds, Slack webhook, alert email — persisted in UC |
-| Persistence of config/rules/audit | REAL | All in `${PO_MONITOR_CATALOG}.po_monitor.*` (see `server/db.py`) |
-| Dark UI | REAL | Custom CSS, Databricks-ish orange accent |
-
-## Spike notes / probe queries
-
-The PO system-table schema is the biggest unknown. In the target workspace, run:
-
-```sql
-SHOW TABLES IN system.storage LIKE '*predictive*';
-SHOW TABLES IN system.lakeflow LIKE '*optim*';
-DESCRIBE system.storage.predictive_optimization_operations_history;
-```
-
-Adjust `server/routes/po.py` and `sql/po_runs.sql` column names once confirmed. The code already returns a clear `spike` message in the API response if the table isn't found, so the frontend doesn't crash.
-
-## Security
-
-- No tokens hardcoded anywhere.
-- `DATABRICKS_WAREHOUSE_ID` comes from resource binding (`valueFrom: sql-warehouse` in `app.yaml`).
-- User OBO is enforced per-request by `get_user_client()`. When deployed, the Databricks Apps runtime injects `X-Forwarded-Access-Token`. Locally, it falls back to your CLI profile.
-- Action endpoints audit `who/what/when/result` (user email pulled from `X-Forwarded-Email`).
-
-## Files added for distribution
-
-| File | Purpose |
-|---|---|
-| `databricks.yml` | Asset Bundle — declares the app + warehouse resource binding for `dev` / `prod` targets |
-| `scripts/deploy.sh` | One-shot deploy: build → validate → deploy → run |
-| `.env.example` | Local-dev config template (copy to `.env`, never committed) |
-| `app.yaml` | Databricks Apps runtime config — uvicorn command, env mapping, OBO scopes |
+Provided as-is, without warranty (see disclaimer at the top). For internal
+or research use; no commercial support is offered.
