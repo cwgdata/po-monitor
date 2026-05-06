@@ -4,6 +4,40 @@ All notable changes to PO Monitor are documented here. The format is loosely
 based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-05-06
+
+Compaction, group-level controls, and policy-cleanup release. Per-table
+PO toggle moves up to the catalog/schema rollup; cards get visibly tighter.
+
+### Added
+- **Catalog/schema rollup cards now expose a Predictive Optimization
+  enable/disable toggle.** Reflects current state from
+  `DESCRIBE {SCHEMA|CATALOG} EXTENDED` and issues
+  `ALTER {SCHEMA|CATALOG} … {ENABLE|DISABLE} PREDICTIVE OPTIMIZATION` as
+  the OBO user.
+- New backend endpoint `/api/actions/toggle_po_group` accepting
+  `{kind: 'schema'|'catalog', catalog, schema?, enabled}`.
+- `/api/po/group_health` response now carries a `po_state` block with
+  `{enabled, raw, inherited}` so the rollup card can render the current
+  setting and inheritance status.
+
+### Changed
+- **Cards are noticeably more compact** — card padding, KPI tile padding,
+  font sizes, action-button height, chart heights all reduced. Grid
+  `minmax(560px → 460px)` so more cards fit per row.
+- **README rewritten for a customer-facing audience** — drops the
+  internal-development "what's real vs stubbed" matrix and "spike notes"
+  sections; adds a feature catalog, configuration table, ASCII
+  architecture diagram, and a Limitations section.
+
+### Removed
+- **Per-table PO toggle removed from `TableCard`.** Predictive
+  Optimization enable/disable is intentionally a schema/catalog-level
+  control only — keeps policy from fragmenting per-table.
+- **Force PO button hidden on `TableCard`.** Pending rewrite against an
+  upstream API; backend `/api/actions/force_trigger` and `api.forceTrigger`
+  client method remain in place for that rewrite.
+
 ## [0.1.0] - 2026-05-04
 
 First public release. PO Monitor is a Databricks App that gives SAs and
